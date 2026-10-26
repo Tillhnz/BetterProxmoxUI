@@ -396,6 +396,18 @@ export function setAdviceCount(n) {
   if (b) { b.textContent = n; b.classList.toggle("hidden", !n); }
 }
 
+// ---------- Sperren (lock) ----------
+export const LOCK_TEXT = {
+  backup: "Sicherung läuft oder wurde abgebrochen", snapshot: "Snapshot wird erstellt", "snapshot-delete": "Snapshot wird gelöscht",
+  rollback: "Snapshot wird zurückgespielt", migrate: "Wird verschoben", clone: "Wird geklont", create: "Wird angelegt",
+  disk: "Festplatte wird bearbeitet", mounted: "Festplatte ist auf dem Server eingehängt", suspending: "Wird in den Ruhezustand versetzt",
+  suspended: "Im Ruhezustand", destroyed: "Wird gelöscht", fstrim: "Speicher wird aufgeräumt", copy: "Wird kopiert",
+};
+export function lockBadge(lock) {
+  if (!lock) return null;
+  return h("span", { class: "badge warn", title: LOCK_TEXT[lock] || lock }, icon("lock", "sm"), "Gesperrt");
+}
+
 // ---------- Kleinkram ----------
 export function guestTypeLabel(t) { return t === "qemu" ? "VM" : "Container"; }
 export function guestIcon(type, status, name) {

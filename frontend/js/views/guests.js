@@ -1,7 +1,7 @@
 import {
   h, icon, clear, pve, state, bytes, pct, uptime, meter, num, guestIcon, statusBadge, callout, loader, nodePath, enc,
   toast, errorToast, trackTask, confirmDialog, openSheet, field, input, select, toggle, withBusy, pageHead, empty, relTime,
-  guestTypeLabel, dateTime,
+  guestTypeLabel, dateTime, api, lockBadge, LOCK_TEXT, taskName, parseUpid,
 } from "../core.js";
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ function guestRow(g, go) {
   return h("div", { class: "list-item clickable", onclick: () => go(`guest/${g.type}/${g.vmid}`) },
     guestIcon(g.type, g.status, g.name),
     h("div", { class: "grow" },
-      h("div", { class: "row", style: { gap: "8px" } }, h("div", { class: "title" }, g.name || `#${g.vmid}`), h("span", { class: "badge" }, `#${g.vmid}`)),
+      h("div", { class: "row", style: { gap: "8px" } }, h("div", { class: "title" }, g.name || `#${g.vmid}`), h("span", { class: "badge" }, `#${g.vmid}`), lockBadge(g.lock)),
       h("div", { class: "meta" }, running
         ? `${guestTypeLabel(g.type)} · CPU ${num((g.cpu || 0) * 100, 0)} % · RAM ${bytes(g.mem)} von ${bytes(g.maxmem)} · läuft seit ${uptime(g.uptime)}`
         : `${guestTypeLabel(g.type)} · ausgeschaltet`)),
@@ -138,6 +138,9 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
         h("div", { style: { flex: 1, minWidth: "200px" } },
           h("div", { class: "row wrap", style: { gap: "8px" } }, h("h1", { style: { margin: 0, fontSize: "24px", letterSpacing: "-.02em" } }, name), statusBadge(status.status)),
           h("div", { class: "muted", style: { marginTop: "2px" } }, `${guestTypeLabel(type)} #${vmid}`, h("span", { id: "ip-line" })))),
+      config.lock ? h("div", { style: { marginTop: "16px" } }, lockCallout(type, vmid, name, config.lock, async () => {
+        try { config = await pve("GET", `${base}/config`); status = await pve("GET", `${base}/status/current`); drawHero(); } catch { /* egal */ }
+      })) : null,
       h("div", { style: { marginTop: "16px" } }, actions),
       h("div", { class: "muted small", style: { marginTop: "10px" } }, "Die Konsole öffnet sich in der Proxmox-Oberfläche (eventuell dort einmal anmelden)."),
     );
@@ -185,9 +188,10 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
 
   page.every(4000, async () => {
     try {
-      const old = status.status;
+      const old = status.status, oldLock = status.lock;
       status = await pve("GET", `${base}/status/current`);
-      if (old !== status.status) drawHero();
+      if (oldLock !== status.lock) { config = await pve("GET", `${base}/config`); drawHero(); }
+      else if (old !== status.status) drawHero();
       drawLive();
     } catch { /* ignorieren */ }
   });
@@ -403,4 +407,55 @@ function dangerCard(type, vmid, base, name, getStatus, go) {
     h("div", { class: "card-head" }, icon("alert"), h("h3", null, "Gefahrenzone")),
     h("p", { class: "muted small", style: { marginTop: "-6px" } }, "Vorsicht: Diese Aktionen lassen sich nicht rückgängig machen."),
     btn);
+}
+
+// ---------------------------------------------------------------------------
+// Entsperren
+// ---------------------------------------------------------------------------
+function lockCallout(type, vmid, name, lock, onDone) {
+  const btn = h("button", { class: "btn sm" }, icon("lock", "sm"), "Entsperren");
+  btn.addEventListener("click", () => unlockFlow(type, vmid, name, lock, onDone));
+  const c = callout("warn", `Gesperrt: ${LOCK_TEXT[lock] || lock}`,
+    "Solange die Sperre besteht, lässt sich die Maschine nicht starten, ändern oder sichern. Das passiert z. B., wenn eine Sicherung abbricht.");
+  c.querySelector("div").append(h("div", { style: { marginTop: "10px" } }, btn));
+  return c;
+}
+
+/** Entsperrt eine Maschine. Prüft vorher, ob noch eine Aufgabe für sie läuft. */
+export async function unlockFlow(type, vmid, name, lock, onDone) {
+  if (!state.user.host_admin) return toast("Nur für root@pam", "Entsperren darf – wie in Proxmox – nur root.", "bad");
+  let running = [];
+  try { running = (await pve("GET", nodePath("/tasks"), { vmid, source: "active" })).filter(t => !t.endtime); } catch { /* egal */ }
+  const doUnlock = async () => {
+    try {
+      await api(`/guests/${type}/${vmid}/unlock`, { method: "POST" });
+      toast(`${name} entsperrt`, "Die Maschine kann wieder normal genutzt werden.");
+      window.dispatchEvent(new Event("bpui:refresh"));
+      onDone && onDone();
+    } catch (e) { errorToast(e, "Entsperren fehlgeschlagen"); }
+  };
+  if (running.length) {
+    openSheet((sheet, close) => {
+      const stopBtn = h("button", { class: "btn danger" }, "Aufgabe abbrechen und entsperren");
+      stopBtn.addEventListener("click", () => withBusy(stopBtn, async () => {
+        try {
+          for (const t of running) await pve("DELETE", `/nodes/${enc(parseUpid(t.upid).node)}/tasks/${enc(t.upid)}`);
+          await new Promise(r => setTimeout(r, 2500));
+          close(); await doUnlock();
+        } catch (e) { errorToast(e); }
+      }));
+      sheet.append(h("h2", null, "Es läuft noch etwas"),
+        h("p", { class: "sheet-sub" }, `Für „${name}“ läuft gerade: ${running.map(t => taskName(t.type, t.id)).join(", ")}. Die Sperre ist also vermutlich noch berechtigt.`),
+        callout("info", "Empfehlung", "Warte, bis die Aufgabe fertig ist – danach verschwindet die Sperre von selbst. Nur abbrechen, wenn sie offensichtlich hängt (z. B. seit Stunden ohne Fortschritt)."),
+        h("div", { class: "sheet-foot" }, h("button", { class: "btn", onclick: () => close() }, "Warten"), stopBtn));
+    });
+    return;
+  }
+  const ok = await confirmDialog({
+    title: `„${name}“ entsperren?`,
+    text: `Grund der Sperre: ${LOCK_TEXT[lock] || lock}. Es läuft keine Aufgabe mehr für diese Maschine – die Sperre ist vermutlich von einem abgebrochenen Vorgang übrig geblieben.`,
+    confirmText: "Entsperren",
+    extra: lock === "mounted" ? callout("warn", null, "Die Festplatte ist noch auf dem Server eingehängt. Nach dem Entsperren ggf. mit „pct unmount " + vmid + "“ aushängen.") : null,
+  });
+  if (ok) await doUnlock();
 }

@@ -715,6 +715,27 @@ async def host_checks(request: Request):
     return JSONResponse({"data": await asyncio.to_thread(_host_checks_sync)})
 
 
+async def guest_unlock(request: Request):
+    """Entsperrt eine Maschine (wie „qm unlock“ / „pct unlock“). Nur root@pam."""
+    s = await get_session(request)
+    if not s or not s.host_admin:
+        return _err(403, "Entsperren darf nur root@pam – genau wie in Proxmox.")
+    gtype, vmid = request.path_params["gtype"], request.path_params["vmid"]
+    if gtype not in ("qemu", "lxc") or not re.fullmatch(r"\d{1,9}", vmid):
+        return _err(400, "Ungültige Maschine")
+    cmd = ["qm" if gtype == "qemu" else "pct", "unlock", vmid]
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), 30)
+    except FileNotFoundError:
+        return _err(500, f"Befehl {cmd[0]} nicht gefunden")
+    except asyncio.TimeoutError:
+        return _err(504, "Entsperren dauert zu lange")
+    if proc.returncode != 0:
+        return _err(400, (out or b"").decode(errors="replace").strip() or "Entsperren fehlgeschlagen")
+    return JSONResponse({"ok": True})
+
+
 def _safe_host_path(p: str) -> str | None:
     if not isinstance(p, str) or not HOST_PATH.match(p) or ".." in p:
         return None
@@ -1030,6 +1051,7 @@ routes = [
     Route("/api/host/mounts", host_mounts),
     Route("/api/host/ls", host_ls),
     Route("/api/host/checks", host_checks),
+    Route("/api/guests/{gtype}/{vmid}/unlock", guest_unlock, methods=["POST"]),
     Route("/api/host/mkdir", host_mkdir, methods=["POST"]),
     Route("/api/jobs", jobs_list, methods=["GET"]),
     Route("/api/jobs", jobs_create, methods=["POST"]),

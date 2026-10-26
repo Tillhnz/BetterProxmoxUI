@@ -3,8 +3,9 @@
 // ===========================================================================
 import {
   h, icon, clear, api, pve, state, bytes, pct, nodePath, enc, toast, errorToast, confirmDialog, withBusy, pageHead, callout,
-  loader, relTime, guestIcon,
+  loader, relTime, guestIcon, LOCK_TEXT,
 } from "../core.js";
+import { unlockFlow } from "./guests.js";
 
 const LEVELS = {
   bad: { label: "Dringend", order: 0, cls: "bad", ico: "alert" },
@@ -118,6 +119,14 @@ export async function runChecks({ force = false } = {}) {
         guests: old, actions: [{ label: "Aktivität ansehen", href: "#/tasks" }, { label: "Jetzt sichern", href: "#/backups" }] });
     }
   }
+
+  // ---------- Gesperrte Maschinen ----------
+  const locked = guests.filter(g => g.lock);
+  if (locked.length) add({ id: `locked-${locked.map(g => g.vmid + g.lock).join("-")}`, level: "warn", cat: "system",
+    title: `${locked.length} Maschine${locked.length === 1 ? " ist" : "n sind"} gesperrt`,
+    why: locked.map(g => `${g.name}: ${LOCK_TEXT[g.lock] || g.lock}`).join(" · ") + ". Gesperrte Maschinen lassen sich nicht starten, ändern oder sichern.",
+    todo: "Läuft keine Aufgabe mehr für die Maschine, ist die Sperre ein Überbleibsel (z. B. von einer abgebrochenen Sicherung) und kann entfernt werden.",
+    guests: locked, actions: admin ? locked.map(g => ({ label: `${g.name} entsperren`, run: () => new Promise(res => unlockFlow(g.type, g.vmid, g.name, g.lock, res).then(() => setTimeout(res, 300))) })) : [] });
 
   // ---------- Speicher ----------
   const root = nodeStatus?.rootfs;

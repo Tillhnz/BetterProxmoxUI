@@ -42,13 +42,22 @@ function shareLabel(src, type) {
 
 async function loadModel() {
   const admin = state.user.host_admin;
-  const [cfgR, nodeR, resR, jobsR, hostR] = await Promise.allSettled([
+  const [cfgR, nodeR, resR, jobsR, hostR, mapR, verR] = await Promise.allSettled([
     pve("GET", "/storage"),
     pve("GET", nodePath("/storage")),
     pve("GET", "/cluster/resources", { type: "vm" }),
     pve("GET", "/cluster/backup"),
     admin ? api("/host/mounts") : Promise.resolve(null),
+    pve("GET", "/cluster/mapping/dir"),
+    pve("GET", "/version").catch(() => pve("GET", nodePath("/version"))),
   ]);
+  const dirMaps = mapR.status === "fulfilled" ? (mapR.value || []) : [];
+  const pveVersion = verR.value?.version || "0";
+  const mapPath = (id) => {
+    const m = dirMaps.find(x => x.id === id);
+    const entry = (m?.map || []).map(e => Object.fromEntries(String(e).split(",").map(kv => kv.split("=")))).find(e => !e.node || e.node === state.node);
+    return entry?.path || null;
+  };
   if (cfgR.status === "rejected") throw cfgR.reason;
   const cfg = cfgR.value || [];
   const nodeSt = new Map((nodeR.value || []).map(s => [s.storage, s]));
@@ -130,6 +139,19 @@ async function loadModel() {
       }
     }
   }
+  // VMs: per virtiofs durchgereichte Ordner
+  for (const g of qemus) {
+    const conf = configs.get(g.vmid);
+    if (!conf) continue;
+    for (const [key, val] of Object.entries(conf)) {
+      if (!/^virtiofs\d+$/.test(key)) continue;
+      const tag = (String(val).match(/(?:^|,)dirid=([^,]+)/) || [])[1] || String(val).split(",")[0];
+      const hostPath = mapPath(tag);
+      if (!hostPath) continue;
+      const src = findByPath(hostPath) || getLocal();
+      links.push({ source: src, guest: g, conf, key, label: tag, hostPath, kind: "virtiofs", tag });
+    }
+  }
   // VMs: Festplatten auf Netzwerkspeicher
   for (const g of qemus) {
     const conf = configs.get(g.vmid);
@@ -167,7 +189,7 @@ async function loadModel() {
       action: { label: "Sicherungen auf NAS umstellen", fn: "moveBackups" } });
   }
 
-  return { sources, links, problems, guests, configs, jobs, host, admin, localBackups };
+  return { sources, links, problems, guests, configs, jobs, host, admin, localBackups, dirMaps, pveVersion };
 }
 
 // ---------------------------------------------------------------------------
@@ -273,12 +295,14 @@ function sourceCard(s, model, reload, go) {
       continue;
     }
     const app = detectApp(l.guest.name);
-    const rm = l.kind === "bind" && model.admin ? h("button", { class: "btn sm icon ghost", title: "Verbindung entfernen", onclick: () => removeLink(l, reload) }, icon("x", "sm")) : null;
+    const rm = (l.kind === "bind" || l.kind === "virtiofs") && model.admin ? h("button", { class: "btn sm icon ghost", title: "Verbindung entfernen", onclick: () => removeLink(l, reload) }, icon("x", "sm")) : null;
     list.append(h("div", { class: "list-item", style: { minHeight: "60px" } },
       guestIcon(l.guest.type, l.guest.status, l.guest.name),
       h("div", { class: "grow", style: { cursor: "pointer" }, onclick: () => go(`guest/${l.guest.type}/${l.guest.vmid}`) },
         h("div", { class: "title" }, app?.title && !l.guest.name.toLowerCase().includes(app.title.toLowerCase().split(" ")[0]) ? `${l.guest.name} (${app.title})` : l.guest.name),
-        h("div", { class: "meta", style: { whiteSpace: "normal" } }, l.kind === "bind"
+        h("div", { class: "meta", style: { whiteSpace: "normal" } }, l.kind === "virtiofs"
+          ? h("span", null, l.hostPath !== s.path ? h("span", { class: "mono" }, l.hostPath.slice(s.path === "/" ? 0 : s.path.length) || "/") : "Ganze Freigabe", " → in der VM über virtiofs ", h("span", { class: "mono" }, `„${l.tag}“`))
+          : l.kind === "bind"
           ? h("span", null, l.hostPath !== s.path ? h("span", { class: "mono" }, l.hostPath.slice(s.path === "/" ? 0 : s.path.length) || "/") : "Ganze Freigabe", " → in der App als ", h("span", { class: "mono" }, l.label))
           : l.label)),
       l.ro ? h("span", { class: "badge" }, "nur lesen") : null, rm));
@@ -322,7 +346,8 @@ function diagram(model, page, go) {
     const id = l.guest ? `g${l.guest.vmid}` : "backup";
     if (!tIndex.has(id)) { tIndex.set(id, { id, guest: l.guest, backup: !!l.job, labels: [] }); targets.push(tIndex.get(id)); }
     const t = tIndex.get(id);
-    if (l.guest && l.kind === "bind" && !t.labels.includes(l.label)) t.labels.push(l.label);
+    const lbl = l.kind === "virtiofs" ? `virtiofs „${l.tag}“` : l.label;
+    if (l.guest && (l.kind === "bind" || l.kind === "virtiofs") && !t.labels.includes(lbl)) t.labels.push(lbl);
   }
 
   const svg = svgEl("svg", { class: "flow-lines" });
@@ -473,14 +498,15 @@ function connectShareSheet(onDone, openShare) {
 // Assistent: Ordner mit einer App teilen (Bind-Mount in einen Container)
 // ---------------------------------------------------------------------------
 function shareFolderSheet(model, presetSource, onDone) {
-  if (!model.admin) return toast("Nur für root@pam", "Ordner in Container einbinden darf in Proxmox nur root.", "bad");
+  if (!model.admin) return toast("Nur für root@pam", "Ordner einbinden darf in Proxmox nur root.", "bad");
   const sources = model.sources.filter(s => s.kind !== "local" && s.path && s.active && !s.stale);
   if (!sources.length) return toast("Keine NAS verbunden", "Verbinde zuerst eine NAS-Freigabe.", "info");
-  const lxcs = model.guests.filter(g => g.type === "lxc");
-  if (!lxcs.length) return toast("Keine Container vorhanden", "Ordner lassen sich nur mit Containern (LXC) teilen.", "info");
+  const targets = [...model.guests].sort((a, b) => (a.type === b.type ? a.vmid - b.vmid : a.type === "lxc" ? -1 : 1));
+  if (!targets.length) return toast("Keine Maschinen vorhanden", "Lege zuerst einen Container oder eine VM an.", "info");
+  const virtiofsOk = verGE(model.pveVersion, "8.4");
 
   openSheet((sheet, close) => {
-    const d = { guest: null, source: presetSource && sources.includes(presetSource) ? presetSource : sources[0], path: null, target: "", ro: false };
+    const d = { guest: null, source: presetSource && sources.includes(presetSource) ? presetSource : sources[0], path: null, target: "", ro: false, method: "virtiofs", os: "linux" };
     d.path = d.source.path;
     const content = h("div");
     sheet.append(h("h2", null, "Ordner mit App teilen"), content);
@@ -488,16 +514,24 @@ function shareFolderSheet(model, presetSource, onDone) {
     // Schritt 1: App wählen
     function step1() {
       clear(content);
-      content.append(h("p", { class: "sheet-sub" }, "Welche App soll auf die NAS zugreifen?"),
-        h("div", { class: "card pad-0 flat" }, h("div", { class: "list" }, lxcs.map(g => {
+      content.append(h("p", { class: "sheet-sub" }, "Welche App oder Maschine soll auf die NAS zugreifen?"),
+        h("div", { class: "card pad-0 flat" }, h("div", { class: "list" }, targets.map(g => {
           const app = detectApp(g.name);
-          return h("div", { class: "list-item clickable", onclick: () => { d.guest = g; const tip = APP_TIPS[app?.logo]; d.target = tip?.path || `/mnt/${d.source.title.replace(/^nas-/, "")}`; step2(); } },
-            guestIcon("lxc", g.status, g.name),
-            h("div", { class: "grow" }, h("div", { class: "title" }, g.name), h("div", { class: "meta" }, app ? `${app.title} · Container #${g.vmid}` : `Container #${g.vmid}`)),
+          const kind = g.type === "lxc" ? "Container" : "VM";
+          return h("div", { class: "list-item clickable", onclick: () => {
+            d.guest = g;
+            const tip = APP_TIPS[app?.logo];
+            d.target = tip?.path || `/mnt/${d.source.title.replace(/^nas-/, "")}`;
+            const conf = model.configs.get(g.vmid) || {};
+            d.os = /^win/.test(conf.ostype || "") ? "windows" : app?.logo === "home-assistant" ? "haos" : "linux";
+            d.method = virtiofsOk && d.os === "linux" ? "virtiofs" : "direct";
+            step2();
+          } },
+            guestIcon(g.type, g.status, g.name),
+            h("div", { class: "grow" }, h("div", { class: "title" }, g.name), h("div", { class: "meta" }, app ? `${app.title} · ${kind} #${g.vmid}` : `${kind} #${g.vmid}`)),
+            g.type === "qemu" ? h("span", { class: "badge info" }, "VM") : null,
             icon("chevronRight", "sm"));
         }))),
-        model.guests.some(g => g.type === "qemu") ? h("p", { class: "muted small", style: { marginTop: "12px" } },
-          "VMs sind nicht aufgeführt: Sie verbinden sich selbst mit der NAS – z. B. in Windows als Netzlaufwerk oder in Home Assistant unter Einstellungen → System → Speicher.") : null,
         h("div", { class: "sheet-foot" }, h("button", { class: "btn", onclick: () => close() }, "Abbrechen")));
     }
 
@@ -536,7 +570,7 @@ function shareFolderSheet(model, presetSource, onDone) {
         h("div", { class: "sheet-foot" }, h("button", { class: "btn", onclick: step1 }, "Zurück"),
           h("button", { class: "btn primary", onclick: () => {
             if (/[\s,=]/.test(d.path)) return toast("Ordnername nicht möglich", "Proxmox kann keine Ordner mit Leerzeichen oder Kommas einbinden. Bitte einen anderen Ordner wählen.", "bad");
-            step3();
+            if (d.guest.type === "qemu") step3vm(); else step3();
           } }, "Diesen Ordner nehmen")));
       browse();
     }
@@ -582,11 +616,173 @@ function shareFolderSheet(model, presetSource, onDone) {
       }));
     }
 
+    // Schritt 3 (VM): Art der Verbindung
+    function step3vm() {
+      clear(content);
+      const app = detectApp(d.guest.name);
+      const box = h("div", { class: "stack", style: { gap: "16px" } });
+      const saveBtn = h("button", { class: "btn primary" });
+      function draw() {
+        clear(box);
+        const choices = h("div", { class: "choice-grid" },
+          h("button", { type: "button", class: `choice ${d.method === "virtiofs" ? "active" : ""}`, disabled: !virtiofsOk, style: virtiofsOk ? null : { opacity: 0.5 },
+            onclick: () => { if (virtiofsOk) { d.method = "virtiofs"; draw(); } } },
+            h("strong", null, "Durchreichen (virtiofs)"), h("span", null, virtiofsOk ? "Proxmox reicht den Ordner direkt in die VM. Schnell, keine Zugangsdaten in der VM nötig." : "Braucht Proxmox 8.4 oder neuer.")),
+          h("button", { type: "button", class: `choice ${d.method === "direct" ? "active" : ""}`, onclick: () => { d.method = "direct"; draw(); } },
+            h("strong", null, "VM verbindet sich selbst"), h("span", null, "Die VM meldet sich wie ein normaler PC bei der NAS an. Klappt mit jedem Betriebssystem.")));
+        box.append(
+          h("div", { class: "card flat", style: { padding: "12px 14px" } },
+            h("div", { class: "row", style: { gap: "10px" } }, sourceIcon(d.source, 32), h("span", { class: "mono small", style: { wordBreak: "break-all" } }, remoteFor(d.source, d.path) || d.path),
+              icon("chevronRight", "sm"), guestIcon("qemu", d.guest.status, d.guest.name), h("strong", null, d.guest.name))),
+          field("Wie soll die VM auf den Ordner zugreifen?", choices),
+          field("Betriebssystem der VM", segmented([{ value: "linux", label: "Linux" }, { value: "windows", label: "Windows" }, { value: "haos", label: "Home Assistant" }], d.os, (v) => {
+            d.os = v; if (v === "haos" && d.method === "virtiofs") d.method = "direct"; draw(); })),
+          d.os !== "windows" ? field("Ordner in der VM", input({ value: d.target, autocapitalize: "off", oninput: (e) => { d.target = e.target.value.trim(); } }), d.os === "haos" ? "Wird bei Home Assistant automatisch vergeben." : "Wo der Ordner in der VM erscheinen soll.") : null,
+          d.method === "virtiofs" && d.os === "haos" ? callout("warn", null, "Home Assistant OS unterstützt virtiofs nicht. Nutze „VM verbindet sich selbst“ – das geht dort bequem über die Einstellungen.") : null,
+          d.method === "virtiofs" && d.os === "windows" ? callout("info", "Windows-Hinweis", "In Windows werden zusätzlich die VirtIO-Treiber und WinFsp gebraucht. Die genauen Schritte zeige ich dir gleich an.") : null,
+          d.method === "virtiofs" && d.guest.status === "running" ? callout("info", null, "Die VM wird dafür neu gestartet (Herunterfahren und wieder Starten).") : null,
+          d.method === "direct" ? callout("info", null, "Hier wird nichts an der VM verändert – du bekommst eine fertige Anleitung mit den passenden Befehlen.") : null,
+          app && APP_TIPS[app.logo] ? callout("info", `Danach in ${app.title}`, APP_TIPS[app.logo].tip) : null);
+        clear(saveBtn).append(icon("check", "sm"), d.method === "virtiofs" ? "Durchreichen" : "Anleitung zeigen");
+        saveBtn.disabled = d.method === "virtiofs" && d.os === "haos";
+      }
+      saveBtn.addEventListener("click", () => withBusy(saveBtn, async () => {
+        if (d.os !== "windows" && d.os !== "haos" && (!/^\/[A-Za-z0-9._/-]+$/.test(d.target) || d.target.includes(".."))) return toast("Ungültiger Pfad", "Beispiel: /mnt/fotos", "bad");
+        if (d.method === "direct") { close(); vmInstructions(d, null); return; }
+        // virtiofs: Directory-Mapping anlegen (oder vorhandenes für denselben Ordner nutzen) und an die VM hängen
+        try {
+          let tag = (model.dirMaps || []).find(m => (m.map || []).some(e => String(e).includes(`path=${d.path}`) && (String(e).includes(`node=${state.node}`) || !String(e).includes("node="))))?.id;
+          if (!tag) {
+            const base = (d.source.title + d.path.slice(d.source.path.length)).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) || "nas";
+            tag = /^[a-z]/.test(base) ? base : `nas-${base}`;
+            let n = 2; while ((model.dirMaps || []).some(m => m.id === tag)) tag = `${base}-${n++}`;
+            await pve("POST", "/cluster/mapping/dir", { id: tag, map: [`node=${state.node},path=${d.path}`], description: `NAS-Ordner für ${d.guest.name} (Proxmox Zentrale)` });
+          }
+          const fresh = await pve("GET", nodePath(`/qemu/${d.guest.vmid}/config`));
+          if (Object.entries(fresh).some(([k, v]) => /^virtiofs\d+$/.test(k) && String(v).includes(`dirid=${tag}`))) return toast("Schon verbunden", "Dieser Ordner ist bereits in die VM durchgereicht.", "info");
+          let n = 0; while (fresh[`virtiofs${n}`] !== undefined) n++;
+          if (n > 9) return toast("Zu viele Ordner", "Eine VM kann höchstens 10 durchgereichte Ordner haben.", "bad");
+          await pve("PUT", nodePath(`/qemu/${d.guest.vmid}/config`), { [`virtiofs${n}`]: `dirid=${tag}` });
+          close();
+          if (d.guest.status === "running") trackTask(await pve("POST", nodePath(`/qemu/${d.guest.vmid}/status/reboot`)), `${d.guest.name} neu starten`, { onDone });
+          else onDone();
+          vmInstructions(d, tag);
+        } catch (e) { errorToast(e, "Durchreichen fehlgeschlagen"); }
+      }));
+      content.append(h("p", { class: "sheet-sub" }, `So bekommt die VM „${d.guest.name}“ Zugriff auf den Ordner.`), box,
+        h("div", { class: "sheet-foot" }, h("button", { class: "btn", onclick: step2 }, "Zurück"), saveBtn));
+      draw();
+    }
+
     step1();
   });
 }
 
+function verGE(v, min) {
+  const a = String(v).split(/[.-]/).map(Number), b = String(min).split(".").map(Number);
+  for (let i = 0; i < b.length; i++) { if ((a[i] || 0) > b[i]) return true; if ((a[i] || 0) < b[i]) return false; }
+  return true;
+}
+
+function remoteFor(src, path) {
+  const sub = path && src.path && path.startsWith(src.path) ? path.slice(src.path.length) : "";
+  if (!src.share) return null;
+  if (/^\/\//.test(src.share)) return src.share + sub;                 // //server/freigabe
+  if (/^[^/]+:\//.test(src.share)) return src.share + sub;             // server:/export
+  return null;
+}
+
+function codeBlock(text) {
+  const pre = h("pre", { class: "log", style: { margin: 0, maxHeight: "none", userSelect: "all" } }, text);
+  const copy = h("button", { class: "btn sm", style: { marginTop: "8px" } }, icon("check", "sm"), "Kopieren");
+  copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(text); toast("Kopiert"); }
+    catch { const r = document.createRange(); r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast("Text markiert", "Jetzt mit Strg+C bzw. „Kopieren“ übernehmen.", "info"); }
+  });
+  return h("div", null, pre, copy);
+}
+
+/** Zeigt die Schritte, die in der VM selbst nötig sind. tag = virtiofs-Kennung, sonst Direktverbindung. */
+function vmInstructions(d, tag) {
+  const remote = remoteFor(d.source, d.path) || "";
+  const isNfs = /nfs/.test(d.source.type);
+  const server = isNfs ? remote.split(":")[0] : remote.replace(/^\/\//, "").split("/")[0];
+  const sharePath = isNfs ? remote.slice(server.length + 1) : remote.replace(/^\/\/[^/]+\//, "");
+  const target = d.target || "/mnt/nas";
+  openSheet((sheet, close) => {
+    let os = d.os;
+    const body = h("div", { class: "stack", style: { gap: "14px" } });
+    const step = (n, text, extra) => h("div", { class: "row", style: { alignItems: "flex-start", gap: "12px" } },
+      h("div", { class: "avatar", style: { background: "var(--accent-soft)", color: "var(--accent)", width: "28px", height: "28px", fontSize: "13px", flex: "none" } }, n),
+      h("div", { style: { flex: 1, minWidth: 0 } }, h("div", null, text), extra || null));
+    function draw() {
+      clear(body);
+      if (tag) {
+        if (os === "linux") body.append(
+          step("1", "In der VM ein Terminal öffnen (oder per SSH verbinden) und den Ordner einhängen:", codeBlock(`sudo mkdir -p ${target}
+sudo mount -t virtiofs ${tag} ${target}`)),
+          step("2", "Damit er nach jedem Neustart wieder da ist, in /etc/fstab eintragen:", codeBlock(`echo '${tag} ${target} virtiofs defaults,nofail 0 0' | sudo tee -a /etc/fstab`)),
+          callout("info", null, "Funktioniert mit allen aktuellen Linux-Systemen (Kernel 5.4 oder neuer)."));
+        else if (os === "windows") body.append(
+          step("1", "Die VirtIO-Treiber für Windows installieren (virtio-win-guest-tools aus der virtio-win-ISO)."),
+          step("2", "WinFsp installieren (kostenlos, winfsp.dev)."),
+          step("3", "In Windows „Dienste“ öffnen, den Dienst „VirtIO-FS Service“ auf „Automatisch“ stellen und starten."),
+          step("4", "Der Ordner erscheint danach als neues Laufwerk (meist Z:) im Explorer."));
+        else body.append(callout("warn", null, "Home Assistant OS unterstützt virtiofs nicht. Bitte „VM verbindet sich selbst“ nutzen."));
+      } else if (os === "linux") {
+        body.append(isNfs
+          ? h("div", { class: "stack" },
+            step("1", "NFS-Werkzeuge installieren und Ordner anlegen:", codeBlock(`sudo apt install -y nfs-common
+sudo mkdir -p ${target}`)),
+            step("2", "Dauerhaft eintragen und einhängen:", codeBlock(`echo '${remote} ${target} nfs defaults,nofail,_netdev 0 0' | sudo tee -a /etc/fstab
+sudo mount -a`)))
+          : h("div", { class: "stack" },
+            step("1", "SMB-Werkzeuge installieren und Ordner anlegen:", codeBlock(`sudo apt install -y cifs-utils
+sudo mkdir -p ${target}`)),
+            step("2", "Zugangsdaten der NAS sicher ablegen (NASBENUTZER und PASSWORT ersetzen):", codeBlock(`printf 'username=NASBENUTZER\\npassword=PASSWORT\\n' | sudo tee /root/.nas-zugang >/dev/null
+sudo chmod 600 /root/.nas-zugang`)),
+            step("3", "Dauerhaft eintragen und einhängen:", codeBlock(`echo '${remote} ${target} cifs credentials=/root/.nas-zugang,uid=1000,gid=1000,nofail,_netdev 0 0' | sudo tee -a /etc/fstab
+sudo mount -a`))));
+      } else if (os === "windows") {
+        body.append(isNfs ? callout("warn", null, "Windows kann NFS nur umständlich. Richte für diesen Ordner besser eine SMB-Freigabe auf der NAS ein.") : h("div", { class: "stack" },
+          step("1", "Im Explorer auf „Dieser PC“ → „Netzlaufwerk verbinden“ klicken."),
+          step("2", "Als Ordner eintragen:", codeBlock(remote.replace(/\//g, "\\"))),
+          step("3", "Häkchen bei „Verbindung bei Anmeldung wiederherstellen“ und „Verbindung mit anderen Anmeldeinformationen herstellen“ setzen, dann Benutzer und Passwort der NAS eingeben."),
+          h("details", null, h("summary", { style: { cursor: "pointer" } }, "Oder per Befehl (PowerShell)"),
+            codeBlock(`net use Z: ${remote.replace(/\//g, "\\")} /persistent:yes /user:NASBENUTZER`))));
+      } else {
+        body.append(
+          step("1", "In Home Assistant: Einstellungen → System → Speicher → „Netzwerkspeicher hinzufügen“."),
+          step("2", "Ausfüllen:", h("dl", { class: "summary", style: { marginTop: "8px" } },
+            h("dt", null, "Name"), h("dd", null, d.source.title.replace(/^nas-/, "") || "nas"),
+            h("dt", null, "Verwendung"), h("dd", null, "Medien, Sicherung oder Teilen – je nach Zweck"),
+            h("dt", null, "Server"), h("dd", { class: "mono" }, server),
+            h("dt", null, "Protokoll"), h("dd", null, isNfs ? "Network File Share (NFS)" : "Samba/Windows (CIFS)"),
+            h("dt", null, isNfs ? "Pfad" : "Freigabe"), h("dd", { class: "mono" }, sharePath || "/"))),
+          !isNfs ? step("3", "Benutzername und Passwort der NAS eingeben und speichern.") : null);
+      }
+    }
+    sheet.append(h("h2", null, tag ? "Fast fertig – jetzt in der VM" : "So verbindest du die VM mit der NAS"),
+      h("p", { class: "sheet-sub" }, tag ? `Proxmox reicht den Ordner unter der Kennung „${tag}“ an „${d.guest.name}“ durch. Ein letzter Schritt in der VM:` : `Diese Schritte machst du einmal in „${d.guest.name}“.`),
+      field("Betriebssystem", segmented([{ value: "linux", label: "Linux" }, { value: "windows", label: "Windows" }, { value: "haos", label: "Home Assistant" }], os, (v) => { os = v; draw(); })),
+      h("div", { style: { marginTop: "16px" } }, body),
+      h("div", { class: "sheet-foot" }, h("button", { class: "btn primary", onclick: () => close() }, "Fertig")));
+    draw();
+  }, { wide: true });
+}
+
 async function removeLink(l, reload) {
+  if (l.kind === "virtiofs") {
+    const running = l.guest.status === "running";
+    if (!await confirmDialog({ title: "Verbindung entfernen?", text: `${l.guest.name} bekommt den Ordner „${l.tag}“ danach nicht mehr durchgereicht. Die Dateien auf der NAS bleiben erhalten.${running ? " Die VM wird dafür neu gestartet." : ""} Entferne vorher den Eintrag in /etc/fstab der VM.`, confirmText: "Entfernen", danger: true })) return;
+    try {
+      await pve("PUT", nodePath(`/qemu/${l.guest.vmid}/config`), { delete: l.key });
+      if (running) trackTask(await pve("POST", nodePath(`/qemu/${l.guest.vmid}/status/reboot`)), `${l.guest.name} neu starten`, { onDone: reload });
+      else reload();
+      toast("Verbindung entfernt");
+    } catch (e) { errorToast(e); }
+    return;
+  }
   const running = l.guest.status === "running";
   if (!await confirmDialog({ title: "Verbindung entfernen?", text: `${l.guest.name} sieht ${l.label} danach nicht mehr. Die Dateien auf der NAS bleiben erhalten.${running ? " Der Container wird dafür neu gestartet." : ""}`, confirmText: "Entfernen", danger: true })) return;
   try {

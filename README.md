@@ -4,10 +4,10 @@ Eine schöne, einfache Oberfläche für **Proxmox VE** – für alle, die ihren 
 
 - **Gleiche Anmeldung wie Proxmox** – Benutzer, Passwort, Bereich (PAM/PVE), auch mit Zwei-Faktor-Code
 - **Übersicht** – Auslastung, laufende Maschinen, Speicherplatz, Hinweise auf Updates und fehlende Sicherungen
-- **Maschinen** – Starten, Herunterfahren, Neustart, Einstellungen, Festplatte vergrößern, Snapshots, Löschen
+- **Maschinen** – Starten, Herunterfahren, Neustart, Einstellungen, Festplatte vergrößern, Snapshots, Löschen, gesperrte Maschinen erkennen und entsperren
 - **Neu anlegen** – Assistenten für Container (LXC) und VMs (inkl. Windows 11 mit TPM/UEFI), Vorlagen und ISOs per Klick laden
 - **Apps** – über 600 Installationen aus den [Proxmox Community-Scripts](https://community-scripts.github.io/ProxmoxVE/) mit eingebautem Terminal
-- **Speicher & NAS** – zeigt als Schaubild, welche NAS-Freigabe mit welcher App (Immich, Paperless, Jellyfin …) verbunden ist, warnt bei nicht erreichbarer NAS oder wenn eine App versehentlich auf die System-Festplatte schreibt; Assistenten zum Verbinden von SMB/NFS-Freigaben und zum Teilen von Ordnern mit Containern
+- **Speicher & NAS** – zeigt als Schaubild, welche NAS-Freigabe mit welcher App (Immich, Paperless, Jellyfin …) verbunden ist, warnt bei nicht erreichbarer NAS oder wenn eine App versehentlich auf die System-Festplatte schreibt; Assistenten zum Verbinden von SMB/NFS-Freigaben und zum Teilen von Ordnern mit Containern und VMs (VMs per virtiofs ab Proxmox 8.4 oder mit fertiger Anleitung für Linux, Windows und Home Assistant OS)
 - **App-Logos** für erkannte Apps und den ganzen Katalog (Icons von [selfh.st](https://selfh.st/icons/))
 - **Empfehlungen** – Gesundheits- und Sicherheits-Check mit Punktzahl: Sicherungen (fehlend, veraltet, nur lokal, ohne Aufbewahrung), Speicherplatz, defekte Festplatten, Updates, ausstehender Neustart, falsche Paketquellen, Zwei-Faktor, privilegierte Container, Autostart, QEMU-Agent u. v. m. – jeweils mit „Warum?“, „Was tun?“ und, wo möglich, Umsetzung per Klick
 - **Sicherungen** – jetzt sichern, automatische Zeitpläne, Wiederherstellen (als neue Maschine oder Original ersetzen)
