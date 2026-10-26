@@ -510,3 +510,4 @@ details > summary::before { content: "›"; display: inline-block; margin-right:
 details[open] > summary::before { transform: rotate(90deg); }
 @media (max-width: 860px) { .hide-sm-block { display: none !important; } }
 h2.section.hide-sm-block { display: flex; }
+.shell > div { min-width: 0; }

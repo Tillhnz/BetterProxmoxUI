@@ -666,6 +666,55 @@ async def host_mounts(request: Request):
     return JSONResponse({"data": data})
 
 
+def _version_key(v: str):
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", v)]
+
+
+def _sshd_setting(name: str) -> str | None:
+    """Liest den wirksamen Wert einer sshd-Einstellung (der erste Treffer gewinnt, Include-Dateien zuerst)."""
+    files = []
+    try:
+        files += sorted(str(p) for p in Path("/etc/ssh/sshd_config.d").glob("*.conf"))
+    except OSError:
+        pass
+    files.append("/etc/ssh/sshd_config")
+    for f in files:
+        try:
+            for line in open(f):
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2 and parts[0].lower() == name.lower():
+                    return parts[1].strip().lower()
+        except OSError:
+            continue
+    return None
+
+
+def _host_checks_sync() -> dict:
+    running = os.uname().release
+    kernels = []
+    try:
+        kernels = sorted((p.name[len("vmlinuz-"):] for p in Path("/boot").glob("vmlinuz-*")), key=_version_key)
+    except OSError:
+        pass
+    latest = kernels[-1] if kernels else running
+    public = [str(n) for n in ALLOWED_NETS if not (n.is_private or n.is_loopback or n.is_link_local)]
+    return {
+        "kernel": {"running": running, "latest": latest, "reboot_needed": bool(kernels) and running != latest},
+        "ssh": {"permit_root_login": _sshd_setting("PermitRootLogin") or "prohibit-password",
+                "password_auth": _sshd_setting("PasswordAuthentication") or "yes",
+                "installed": Path("/usr/sbin/sshd").exists()},
+        "fail2ban": Path("/usr/bin/fail2ban-server").exists(),
+        "bpui": {"public_nets": public, "bind": os.environ.get("BPUI_BIND", ""), "host_actions": HOST_ACTIONS},
+    }
+
+
+async def host_checks(request: Request):
+    s = await get_session(request)
+    if not s or not s.host_admin:
+        return _err(403, "Nur für root@pam")
+    return JSONResponse({"data": await asyncio.to_thread(_host_checks_sync)})
+
+
 def _safe_host_path(p: str) -> str | None:
     if not isinstance(p, str) or not HOST_PATH.match(p) or ".." in p:
         return None
@@ -980,6 +1029,7 @@ routes = [
     Route("/api/logo/{slug}", logo),
     Route("/api/host/mounts", host_mounts),
     Route("/api/host/ls", host_ls),
+    Route("/api/host/checks", host_checks),
     Route("/api/host/mkdir", host_mkdir, methods=["POST"]),
     Route("/api/jobs", jobs_list, methods=["GET"]),
     Route("/api/jobs", jobs_create, methods=["POST"]),

@@ -10,6 +10,7 @@ import { renderBackups } from "./js/views/backups.js";
 import { renderUpdates } from "./js/views/updates.js";
 import { renderTasks } from "./js/views/tasks.js";
 import { renderStorage } from "./js/views/storage.js";
+import { renderAdvice } from "./js/views/advice.js";
 
 const app = document.getElementById("app");
 let cleanup = [];          // Timer & Listener der aktuellen Seite
@@ -21,6 +22,7 @@ const NAV = [
   { path: "new", label: "Neu anlegen", short: "Neu", icon: "plus" },
   { path: "apps", label: "Apps", icon: "apps" },
   { path: "storage", label: "Speicher & NAS", icon: "network" },
+  { path: "advice", label: "Empfehlungen", icon: "shield" },
   { path: "backups", label: "Sicherungen", icon: "archive" },
   { path: "updates", label: "Updates", icon: "refresh" },
   { path: "tasks", label: "Aktivität", icon: "list" },
@@ -60,6 +62,7 @@ function route() {
     updates: () => renderUpdates(ctx),
     tasks: () => renderTasks(ctx),
     storage: () => renderStorage(ctx),
+    advice: () => renderAdvice(ctx),
   };
   (views[view] || views.dashboard)();
 }
@@ -96,7 +99,8 @@ function renderShell() {
       NAV.slice(0, 5).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label)),
       h("div", { class: "nav-section" }, "Pflege"),
       NAV.slice(5).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label,
-        n.path === "updates" ? h("span", { class: "badge count hidden", id: "upd-badge" }) : null)),
+        n.path === "updates" ? h("span", { class: "badge count hidden", id: "upd-badge" }) : null,
+        n.path === "advice" ? h("span", { class: "badge count hidden", id: "adv-badge" }) : null)),
     ),
     h("div", { class: "sidebar-foot" },
       h("div", { class: "user-chip" }, h("div", { class: "avatar" }, initials),
@@ -135,6 +139,7 @@ function openMoreMenu() {
       h("p", { class: "sheet-sub" }, `Angemeldet als ${state.user.username}`),
       nodePicker(),
       h("div", { class: "card pad-0 flat" }, h("div", { class: "list" },
+        item("shield", "Empfehlungen", () => go("advice")),
         item("network", "Speicher & NAS", () => go("storage")),
         item("refresh", "Updates", () => go("updates"), state.updatesCount ? h("span", { class: "badge count" }, state.updatesCount) : null),
         item("list", "Aktivität", () => go("tasks")),

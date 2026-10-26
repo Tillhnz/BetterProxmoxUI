@@ -391,6 +391,11 @@ export function setUpdatesCount(n) {
   if (b) { b.textContent = n; b.classList.toggle("hidden", !n); }
 }
 
+export function setAdviceCount(n) {
+  const b = document.getElementById("adv-badge");
+  if (b) { b.textContent = n; b.classList.toggle("hidden", !n); }
+}
+
 // ---------- Kleinkram ----------
 export function guestTypeLabel(t) { return t === "qemu" ? "VM" : "Container"; }
 export function guestIcon(type, status, name) {

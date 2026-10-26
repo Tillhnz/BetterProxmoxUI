@@ -1,4 +1,5 @@
-import { h, icon, clear, pve, state, bytes, pct, uptime, meter, ring, num, guestIcon, callout, loader, nodePath, setUpdatesCount } from "../core.js";
+import { runChecks, openIssues } from "./advice.js";
+import { h, icon, clear, pve, state, setAdviceCount, bytes, pct, uptime, meter, ring, num, guestIcon, callout, loader, nodePath, setUpdatesCount } from "../core.js";
 
 function greeting() {
   const hr = new Date().getHours();
@@ -28,23 +29,28 @@ export async function renderDashboard({ page, el, go }) {
   let nodeStatus = null;
   async function loadStatic() {
     try { nodeStatus = await pve("GET", nodePath("/status")); } catch { nodeStatus = null; }
-    // Hinweise: Updates und fehlende Sicherungen
-    clear(notices);
-    try {
-      const upd = await pve("GET", nodePath("/apt/update"));
-      setUpdatesCount(upd.length);
-      if (upd.length) {
-        notices.append(h("div", { class: "card clickable flat", onclick: () => go("updates"), style: { padding: "0" } },
-          callout("info", `${upd.length} Update${upd.length === 1 ? "" : "s"} verfügbar`, "Tippe hier, um sie anzusehen und zu installieren.", "refresh")));
+    // Updates zählen (für das Abzeichen in der Navigation)
+    pve("GET", nodePath("/apt/update")).then(u => setUpdatesCount(u.length)).catch(() => {});
+    // Empfehlungen im Hintergrund prüfen
+    clear(notices).append(h("div", { class: "card", style: { padding: "14px 18px" } }, h("div", { class: "row muted" }, icon("spinner", "spin sm"), "Prüfe Empfehlungen …")));
+    runChecks().then(items => {
+      const open = openIssues(items);
+      setAdviceCount(open.length);
+      clear(notices);
+      if (!open.length) {
+        notices.append(h("a", { class: "card clickable flat", href: "#/advice", style: { padding: 0, display: "block", color: "var(--text)" } },
+          callout("ok", "Alles im grünen Bereich", "Keine offenen Sicherheits- oder Handlungsempfehlungen.", "shield")));
+        return;
       }
-    } catch { /* keine Rechte */ }
-    try {
-      const jobs = await pve("GET", "/cluster/backup");
-      if (!jobs.length) {
-        notices.append(h("div", { class: "card clickable flat", onclick: () => go("backups"), style: { padding: "0" } },
-          callout("warn", "Noch keine automatische Sicherung", "Richte einen Zeitplan ein, damit deine Maschinen regelmäßig gesichert werden.", "shield")));
-      }
-    } catch { /* keine Rechte */ }
+      const bad = open.filter(i => i.level === "bad").length;
+      notices.append(h("div", { class: "card pad-0" },
+        h("div", { class: "row wrap", style: { padding: "14px 18px 6px", gap: "8px 10px" } }, icon("shield"), h("h3", { style: { margin: 0 } }, "Empfehlungen"),
+          bad ? h("span", { class: "badge bad" }, `${bad} dringend`) : null, h("span", { class: "badge warn" }, `${open.length} offen`),
+          h("span", { class: "spacer" }), h("a", { class: "btn sm ghost", href: "#/advice" }, "Alle", icon("chevronRight", "sm"))),
+        h("div", { class: "list" }, open.slice(0, 3).map(i => h("a", { class: "list-item clickable", href: "#/advice", style: { color: "var(--text)", minHeight: "52px" } },
+          h("span", { style: { color: `var(--${i.level === "bad" ? "bad" : "warn"})`, display: "flex" } }, icon(i.level === "bad" ? "alert" : "info")),
+          h("div", { class: "grow" }, h("div", { class: "title", style: { whiteSpace: "normal" } }, i.title)), icon("chevronRight", "sm"))))));
+    }).catch(() => clear(notices));
   }
 
   async function load() {
