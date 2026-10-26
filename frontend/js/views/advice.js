@@ -3,9 +3,10 @@
 // ===========================================================================
 import {
   h, icon, clear, api, pve, state, bytes, pct, nodePath, enc, toast, errorToast, confirmDialog, withBusy, pageHead, callout,
-  loader, relTime, guestIcon, LOCK_TEXT,
+  relTime, guestIcon, LOCK_TEXT,
 } from "../core.js";
 import { unlockFlow } from "./guests.js";
+import { analyzeAll, applySizing } from "../sizing.js";
 
 const LEVELS = {
   bad: { label: "Dringend", order: 0, cls: "bad", ico: "alert" },
@@ -13,7 +14,7 @@ const LEVELS = {
   info: { label: "Gut zu wissen", order: 2, cls: "info", ico: "info" },
   ok: { label: "Alles in Ordnung", order: 3, cls: "ok", ico: "checkCircle" },
 };
-const CATS = { daten: "Datensicherheit", sicherheit: "Sicherheit", system: "System", speicher: "Speicher" };
+const CATS = { daten: "Datensicherheit", sicherheit: "Sicherheit", system: "System", speicher: "Speicher", leistung: "Leistung" };
 
 function dismissed() { try { return new Set(JSON.parse(localStorage.getItem("bpui-dismissed") || "[]")); } catch { return new Set(); } }
 function setDismissed(set) { try { localStorage.setItem("bpui-dismissed", JSON.stringify([...set])); } catch { /* egal */ } }
@@ -119,6 +120,20 @@ export async function runChecks({ force = false } = {}) {
         guests: old, actions: [{ label: "Aktivität ansehen", href: "#/tasks" }, { label: "Jetzt sichern", href: "#/backups" }] });
     }
   }
+
+  // ---------- Leistung: passt die Größe der Dienste? ----------
+  const nodeCores = nodeStatus?.cpuinfo?.cpus || nodeRes.maxcpu || 4;
+  const sizing = await analyzeAll(guests, configs, nodeCores).catch(() => []);
+  for (const sz of sizing) {
+    add({ id: `${sz.id}-${Math.round((sz.to || 0) / 1e6)}`, level: sz.level, cat: "leistung", title: sz.title, why: sz.why, todo: sz.todo, guests: [sz.guest],
+      sizing: sz, actions: [{ label: sz.dir === "up" ? "Erhöhen" : "Reduzieren", run: () => applySizing(sz) }] });
+  }
+  const savings = sizing.filter(sz => sz.kind === "mem" && sz.dir === "down").reduce((a, sz) => a + (sz.from - sz.to), 0);
+  const needs = sizing.filter(sz => sz.kind === "mem" && sz.dir === "up").reduce((a, sz) => a + (sz.to - sz.from), 0);
+  if (savings && needs) add({ id: "size-balance", level: "info", cat: "leistung", title: "Arbeitsspeicher umverteilen",
+    why: `Einige Dienste brauchen zusammen ${bytes(needs)} mehr, andere könnten ${bytes(savings)} abgeben.`,
+    todo: "Erst die Einsparungen übernehmen, dann die Erhöhungen – so bleibt der Server im grünen Bereich." });
+  if (guests.some(g => g.status === "running") && !sizing.length) add({ id: "size-ok", level: "ok", cat: "leistung", title: "Alle laufenden Dienste sind passend dimensioniert" });
 
   // ---------- Gesperrte Maschinen ----------
   const locked = guests.filter(g => g.lock);

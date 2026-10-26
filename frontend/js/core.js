@@ -93,6 +93,7 @@ const P = {
   upload: '<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
+  chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>',
@@ -483,3 +484,116 @@ export function prettyTemplate(volid) {
   return `${names[m[1].toLowerCase()] || m[1]} ${m[2]}`;
 }
 export function debounce(fn, ms = 250) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+// ---------- Diagramme (eigene, schlanke SVG-Liniendiagramme) ----------
+export const TIMEFRAMES = [
+  { value: "hour", label: "Stunde" }, { value: "day", label: "Tag" }, { value: "week", label: "Woche" },
+  { value: "month", label: "Monat" }, { value: "year", label: "Jahr" },
+];
+
+/** Lädt Verlaufsdaten (RRD) eines Pfads, z. B. nodePath("/rrddata") oder nodePath("/lxc/100/rrddata"). */
+export async function rrd(path, timeframe = "day", cf = "AVERAGE") {
+  const rows = await pve("GET", path, { timeframe, cf });
+  return (rows || []).filter(r => r && r.time).sort((a, b) => a.time - b.time);
+}
+
+export function percentile(values, p) {
+  const v = values.filter(x => typeof x === "number" && !isNaN(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return v[Math.min(v.length - 1, Math.floor((p / 100) * v.length))];
+}
+
+/**
+ * Liniendiagramm. series: [{ key, label, color, fn? (row → Wert) }]
+ * opts: { height, fmt (Wert → Text), max (feste Obergrenze), stack }
+ */
+export function lineChart(rows, series, opts = {}) {
+  const height = opts.height || 170;
+  const fmt = opts.fmt || ((v) => String(Math.round(v)));
+  const wrap = h("div", { class: "chart" });
+  const tip = h("div", { class: "chart-tip hidden" });
+  const legend = h("div", { class: "chart-legend" }, series.map(s => h("span", null, h("i", { style: { background: s.color } }), s.label)));
+  const box = h("div", { class: "chart-box", style: { height: `${height}px` } });
+  wrap.append(legend, box);
+  box.append(tip);
+  const val = (r, s) => { const v = s.fn ? s.fn(r) : r[s.key]; return typeof v === "number" && !isNaN(v) ? v : null; };
+  if (!rows.length || !rows.some(r => series.some(s => val(r, s) !== null))) {
+    box.append(h("div", { class: "muted small", style: { padding: "40px 0", textAlign: "center" } }, "Noch keine Daten für diesen Zeitraum."));
+    return wrap;
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  const mk = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+  let svg = null, cursor = null, geom = null;
+
+  function render() {
+    const W = Math.max(200, box.clientWidth);
+    const H = height, padL = 52, padR = 8, padT = 8, padB = 22;
+    const t0 = rows[0].time, t1 = rows[rows.length - 1].time || t0 + 1;
+    let max = opts.max ?? 0;
+    if (opts.max === undefined) for (const r of rows) for (const s of series) { const v = val(r, s); if (v !== null && v > max) max = v; }
+    if (!max) max = 1;
+    max *= opts.max === undefined ? 1.12 : 1;
+    const x = (t) => padL + ((t - t0) / Math.max(1, t1 - t0)) * (W - padL - padR);
+    const y = (v) => padT + (1 - v / max) * (H - padT - padB);
+    if (svg) svg.remove();
+    svg = mk("svg", { width: W, height: H, class: "chart-svg" });
+    // Gitterlinien + Achsenbeschriftung
+    for (let i = 0; i <= 3; i++) {
+      const v = (max / 3) * i, yy = y(v);
+      svg.append(mk("line", { x1: padL, x2: W - padR, y1: yy, y2: yy, class: "chart-grid" }));
+      const t = mk("text", { x: padL - 6, y: yy + 4, "text-anchor": "end", class: "chart-axis" }); t.textContent = fmt(v); svg.append(t);
+    }
+    const span = t1 - t0;
+    const fmtT = (ts) => { const d = new Date(ts * 1000); return span > 3 * 86400 ? d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }) : d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }); };
+    for (let i = 0; i <= 4; i++) {
+      const ts = t0 + (span * i) / 4;
+      const t = mk("text", { x: x(ts), y: H - 5, "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle", class: "chart-axis" }); t.textContent = fmtT(ts); svg.append(t);
+    }
+    series.forEach((s, si) => {
+      let d = "", area = "", started = false, firstX = 0, lastX = 0;
+      for (const r of rows) {
+        const v = val(r, s);
+        if (v === null) { if (started && si === 0 && !opts.noArea) { area += `L${lastX},${y(0)}Z`; } started = false; continue; }
+        const px = x(r.time), py = y(v);
+        if (!started) { d += `M${px},${py}`; if (si === 0) { area += `M${px},${y(0)}L${px},${py}`; firstX = px; } started = true; }
+        else { d += `L${px},${py}`; if (si === 0) area += `L${px},${py}`; }
+        lastX = px;
+      }
+      if (si === 0 && started && !opts.noArea) area += `L${lastX},${y(0)}Z`;
+      void firstX;
+      if (si === 0 && area && !opts.noArea) svg.append(mk("path", { d: area, fill: s.color, opacity: 0.12 }));
+      svg.append(mk("path", { d, fill: "none", stroke: s.color, "stroke-width": 1.8, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    });
+    cursor = mk("line", { x1: 0, x2: 0, y1: padT, y2: H - padB, class: "chart-cursor", visibility: "hidden" });
+    svg.append(cursor);
+    box.insertBefore(svg, tip);
+    geom = { x, padL, padR, W };
+  }
+
+  function show(clientX) {
+    if (!geom) return;
+    const rect = box.getBoundingClientRect();
+    const px = clientX - rect.left;
+    let best = 0, bd = Infinity;
+    rows.forEach((r, i) => { const dd = Math.abs(geom.x(r.time) - px); if (dd < bd) { bd = dd; best = i; } });
+    const r = rows[best];
+    const cx = geom.x(r.time);
+    cursor.setAttribute("x1", cx); cursor.setAttribute("x2", cx); cursor.setAttribute("visibility", "visible");
+    clear(tip).append(h("div", { class: "muted" }, new Date(r.time * 1000).toLocaleString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })),
+      series.map(s => { const v = val(r, s); return h("div", null, h("i", { style: { background: s.color } }), `${s.label}: `, h("strong", null, v === null ? "–" : fmt(v))); }));
+    tip.classList.remove("hidden");
+    const tw = tip.offsetWidth;
+    tip.style.left = `${Math.min(Math.max(cx + 10, 0), geom.W - tw - 4) + (cx + 10 + tw > geom.W ? -tw - 20 : 0)}px`;
+  }
+  box.addEventListener("pointermove", (e) => show(e.clientX));
+  box.addEventListener("pointerdown", (e) => show(e.clientX));
+  box.addEventListener("pointerleave", () => { tip.classList.add("hidden"); cursor && cursor.setAttribute("visibility", "hidden"); });
+  const ro = new ResizeObserver(() => render());
+  ro.observe(box);
+  requestAnimationFrame(render);
+  return wrap;
+}
+
+export function chartCard(title, chartEl, sub) {
+  return h("div", { class: "card" }, h("div", { class: "row", style: { marginBottom: "6px" } }, h("h3", { style: { margin: 0 } }, title), sub ? h("span", { class: "muted small", style: { marginLeft: "auto" } }, sub) : null), chartEl);
+}

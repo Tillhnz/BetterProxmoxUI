@@ -10,6 +10,11 @@ Eine schöne, einfache Oberfläche für **Proxmox VE** – für alle, die ihren 
 - **Speicher & NAS** – zeigt als Schaubild, welche NAS-Freigabe mit welcher App (Immich, Paperless, Jellyfin …) verbunden ist, warnt bei nicht erreichbarer NAS oder wenn eine App versehentlich auf die System-Festplatte schreibt; Assistenten zum Verbinden von SMB/NFS-Freigaben und zum Teilen von Ordnern mit Containern und VMs (VMs per virtiofs ab Proxmox 8.4 oder mit fertiger Anleitung für Linux, Windows und Home Assistant OS)
 - **App-Logos** für erkannte Apps und den ganzen Katalog (Icons von [selfh.st](https://selfh.st/icons/))
 - **Empfehlungen** – Gesundheits- und Sicherheits-Check mit Punktzahl: Sicherungen (fehlend, veraltet, nur lokal, ohne Aufbewahrung), Speicherplatz, defekte Festplatten, Updates, ausstehender Neustart, falsche Paketquellen, Zwei-Faktor, privilegierte Container, Autostart, QEMU-Agent u. v. m. – jeweils mit „Warum?“, „Was tun?“ und, wo möglich, Umsetzung per Klick
+- **Größen-Empfehlungen** – wertet die Auslastung der letzten 7 Tage aus: welcher Dienst mehr Arbeitsspeicher, Kerne oder Festplatte braucht und wo sich etwas einsparen lässt; per Klick übernehmen
+- **Statistik** – Diagramme für Server (CPU, RAM, Netzwerk, Last, Festplatte), Speicher und jede Maschine über Stunde/Tag/Woche/Monat/Jahr, Rangliste der größten Verbraucher
+- **Server** – Systeminfos, Dienste (neu starten), Systemprotokoll mit Filter, Festplatten mit SMART-Werten, ZFS-Pools, Netzwerk-Übersicht, Host-Konsole
+- **Benutzer** – Benutzer anlegen, verständliche Rollen (Administrator, Maschinen verwalten/bedienen, Nur ansehen), Passwort ändern, deaktivieren, Zwei-Faktor-Status
+- **Maschinen-Details** – Verlaufsdiagramme, Hardware (CD/ISO wechseln, Festplatte und Netzwerkkarte hinzufügen), Start-Reihenfolge, Schlagwörter, Löschschutz, Klonen, Vorlage, Verschieben im Cluster, Aufgaben-Verlauf
 - **Sicherungen** – jetzt sichern, automatische Zeitpläne, Wiederherstellen (als neue Maschine oder Original ersetzen)
 - **Updates** – Proxmox-Updates prüfen und installieren, alle Container aktualisieren, Oberfläche selbst aktualisieren
 - **Nur im Heimnetz erreichbar**, optimiert für Handy und Desktop, hell und dunkel
@@ -51,6 +56,10 @@ Datei `/etc/better-proxmox-ui.env`, danach `systemctl restart better-proxmox-ui`
 - Sitzungs-Cookie `HttpOnly`/`SameSite=Strict`, CSRF-Schutz, Sperre nach 10 Fehlversuchen.
 - **Apps installieren, Proxmox-Updates und die Host-Konsole** brauchen Root-Rechte auf dem Server. Deshalb läuft der Dienst als root, und diese Funktionen sind – wie in Proxmox selbst – nur für `root@pam` freigeschaltet.
 - Die App-Skripte stammen vom Community-Projekt *community-scripts*, nicht von Proxmox.
+
+## Was bewusst in der Proxmox-Oberfläche bleibt
+
+Cluster & Hochverfügbarkeit, Firewall-Regeln, Netzwerk ändern/SDN, Festplatten initialisieren (ZFS/LVM/Ceph), Replikation, Benachrichtigungen, Metrik-Server, ACME-Zertifikate, Pools und API-Tokens sowie USB-/PCI-Durchreichung. Unter **Server → Mehr** gibt es dafür Direktlinks.
 
 ## Sicherheitsempfehlungen für deinen Server
 

@@ -511,3 +511,15 @@ details[open] > summary::before { transform: rotate(90deg); }
 @media (max-width: 860px) { .hide-sm-block { display: none !important; } }
 h2.section.hide-sm-block { display: flex; }
 .shell > div { min-width: 0; }
+
+/* ---------- Diagramme ---------- */
+.chart-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+.chart-legend i, .chart-tip i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.chart-box { position: relative; touch-action: pan-y; }
+.chart-svg { display: block; overflow: visible; }
+.chart-grid { stroke: var(--line); stroke-width: 1; }
+.chart-axis { fill: var(--muted); font-size: 10.5px; font-family: var(--font); }
+.chart-cursor { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart-tip { position: absolute; top: 6px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+  font-size: 12.5px; box-shadow: var(--shadow-lg); pointer-events: none; white-space: nowrap; z-index: 2; }
+.grid.charts { grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); }

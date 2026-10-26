@@ -3,6 +3,7 @@ import {
   toast, errorToast, trackTask, confirmDialog, openSheet, field, input, select, toggle, withBusy, pageHead, empty, relTime,
   guestTypeLabel, dateTime, api, lockBadge, LOCK_TEXT, taskName, parseUpid,
 } from "../core.js";
+import { statsSection, sizingSection, hardwareCard, optionsCard, actionsCard, historyCard } from "./guestExtra.js";
 
 // ---------------------------------------------------------------------------
 // Liste
@@ -179,10 +180,17 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
   }
 
   drawHero(); drawLive();
+  const reload = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
   body.append(
+    sizingSection({ type, vmid: Number(vmid), name, status: status.status, maxcpu: status.cpus }, config, reload),
+    statsSection(type, vmid),
     settingsCard(type, vmid, base, config, name),
+    hardwareCard(type, vmid, base, config, name, reload),
+    optionsCard(type, base, config, reload),
     snapshotsCard(type, base, name, page),
     backupCard(type, vmid, name),
+    actionsCard(type, vmid, base, config, name, () => status, go),
+    historyCard(vmid),
     dangerCard(type, vmid, base, name, () => status, go),
   );
 

@@ -11,6 +11,9 @@ import { renderUpdates } from "./js/views/updates.js";
 import { renderTasks } from "./js/views/tasks.js";
 import { renderStorage } from "./js/views/storage.js";
 import { renderAdvice } from "./js/views/advice.js";
+import { renderStats } from "./js/views/stats.js";
+import { renderNode } from "./js/views/node.js";
+import { renderUsers } from "./js/views/users.js";
 
 const app = document.getElementById("app");
 let cleanup = [];          // Timer & Listener der aktuellen Seite
@@ -23,9 +26,12 @@ const NAV = [
   { path: "apps", label: "Apps", icon: "apps" },
   { path: "storage", label: "Speicher & NAS", icon: "network" },
   { path: "advice", label: "Empfehlungen", icon: "shield" },
+  { path: "stats", label: "Statistik", icon: "chart" },
   { path: "backups", label: "Sicherungen", icon: "archive" },
   { path: "updates", label: "Updates", icon: "refresh" },
   { path: "tasks", label: "Aktivität", icon: "list" },
+  { path: "node", label: "Server", icon: "server", section: "System" },
+  { path: "users", label: "Benutzer", icon: "user" },
 ];
 
 // ---------- Seite-Kontext für Views ----------
@@ -63,6 +69,9 @@ function route() {
     tasks: () => renderTasks(ctx),
     storage: () => renderStorage(ctx),
     advice: () => renderAdvice(ctx),
+    stats: () => renderStats(ctx),
+    node: () => renderNode(ctx),
+    users: () => renderUsers(ctx),
   };
   (views[view] || views.dashboard)();
 }
@@ -98,9 +107,9 @@ function renderShell() {
     h("nav", { class: "nav" },
       NAV.slice(0, 5).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label)),
       h("div", { class: "nav-section" }, "Pflege"),
-      NAV.slice(5).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label,
+      NAV.slice(5).map(n => [n.section ? h("div", { class: "nav-section" }, n.section) : null, h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label,
         n.path === "updates" ? h("span", { class: "badge count hidden", id: "upd-badge" }) : null,
-        n.path === "advice" ? h("span", { class: "badge count hidden", id: "adv-badge" }) : null)),
+        n.path === "advice" ? h("span", { class: "badge count hidden", id: "adv-badge" }) : null)]),
     ),
     h("div", { class: "sidebar-foot" },
       h("div", { class: "user-chip" }, h("div", { class: "avatar" }, initials),
@@ -140,6 +149,9 @@ function openMoreMenu() {
       nodePicker(),
       h("div", { class: "card pad-0 flat" }, h("div", { class: "list" },
         item("shield", "Empfehlungen", () => go("advice")),
+        item("chart", "Statistik", () => go("stats")),
+        item("server", "Server", () => go("node")),
+        item("user", "Benutzer", () => go("users")),
         item("network", "Speicher & NAS", () => go("storage")),
         item("refresh", "Updates", () => go("updates"), state.updatesCount ? h("span", { class: "badge count" }, state.updatesCount) : null),
         item("list", "Aktivität", () => go("tasks")),
