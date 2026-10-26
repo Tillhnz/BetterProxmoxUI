@@ -1,5 +1,5 @@
 import {
-  h, icon, clear, api, state, toast, errorToast, openSheet, confirmDialog, withBusy, pageHead, callout, loader, colorFor, empty, relTime,
+  h, icon, clear, api, state, toast, errorToast, openSheet, confirmDialog, withBusy, pageHead, callout, loader, empty, relTime, appAvatar, setAppIndex,
 } from "../core.js";
 
 const KIND_LABEL = { ct: "Container", vm: "VM", tool: "Proxmox-Werkzeug" };
@@ -24,6 +24,7 @@ export async function renderApps({ page, el, go }) {
   try {
     const res = await api("/scripts");
     items = res.data || [];
+    setAppIndex(items, res.aliases);
     if (!res.host_admin) {
       notice.append(h("div", { style: { marginBottom: "16px" } }, callout("warn", "Nur mit root-Zugang",
         state.user.host_actions ? "Apps werden direkt auf dem Proxmox-Server installiert. Das darf – wie in Proxmox selbst – nur der Benutzer root@pam." : "Host-Aktionen sind in den Einstellungen abgeschaltet.")));
@@ -42,9 +43,8 @@ export async function renderApps({ page, el, go }) {
   }
 
   function card(it) {
-    const initials = it.title.replace(/[^A-Za-z0-9 ]/g, "").split(" ").filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
     return h("div", { class: "card clickable", style: { display: "flex", gap: "14px", alignItems: "flex-start", padding: "16px" }, onclick: () => appSheet(it, go) },
-      h("div", { class: "app-avatar", style: { background: colorFor(it.path) } }, initials),
+      appAvatar(it.logo, it.title, { key: it.path }),
       h("div", { style: { minWidth: 0, flex: 1 } },
         h("div", { style: { fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, it.title),
         h("div", { class: "muted small", style: { marginTop: "2px", display: "-webkit-box", WebkitLineClamp: "2", WebkitBoxOrient: "vertical", overflow: "hidden" } },
@@ -107,8 +107,7 @@ function appSheet(it, go) {
     const src = `https://github.com/community-scripts/ProxmoxVE/blob/main/${it.path}`;
     sheet.append(
       h("div", { class: "row", style: { gap: "14px", marginBottom: "14px" } },
-        h("div", { class: "app-avatar", style: { background: colorFor(it.path), width: "56px", height: "56px", fontSize: "20px" } },
-          it.title.replace(/[^A-Za-z0-9 ]/g, "").split(" ").filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase()),
+        appAvatar(it.logo, it.title, { size: 56, key: it.path }),
         h("div", null, h("h2", { style: { margin: 0 } }, it.title), h("div", { class: "muted" }, KIND_LABEL[it.kind]))),
       it.description ? h("p", null, it.description) : null,
       h("div", { class: "stack" },

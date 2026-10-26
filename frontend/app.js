@@ -1,7 +1,7 @@
 // ===========================================================================
 // Proxmox Zentrale – App-Hülle, Navigation, Login
 // ===========================================================================
-import { h, icon, clear, api, pve, state, toast, errorToast, field, input, select, enc, openSheet, setUpdatesCount } from "./js/core.js";
+import { h, icon, clear, api, pve, state, toast, errorToast, field, input, select, enc, openSheet, setUpdatesCount, setAppIndex } from "./js/core.js";
 import { renderDashboard } from "./js/views/dashboard.js";
 import { renderGuests, renderGuestDetail } from "./js/views/guests.js";
 import { renderNew, renderNewLxc, renderNewVm } from "./js/views/create.js";
@@ -9,6 +9,7 @@ import { renderApps, renderJob } from "./js/views/apps.js";
 import { renderBackups } from "./js/views/backups.js";
 import { renderUpdates } from "./js/views/updates.js";
 import { renderTasks } from "./js/views/tasks.js";
+import { renderStorage } from "./js/views/storage.js";
 
 const app = document.getElementById("app");
 let cleanup = [];          // Timer & Listener der aktuellen Seite
@@ -19,6 +20,7 @@ const NAV = [
   { path: "guests", label: "Maschinen", icon: "server" },
   { path: "new", label: "Neu anlegen", short: "Neu", icon: "plus" },
   { path: "apps", label: "Apps", icon: "apps" },
+  { path: "storage", label: "Speicher & NAS", icon: "network" },
   { path: "backups", label: "Sicherungen", icon: "archive" },
   { path: "updates", label: "Updates", icon: "refresh" },
   { path: "tasks", label: "Aktivität", icon: "list" },
@@ -57,6 +59,7 @@ function route() {
     backups: () => renderBackups(ctx),
     updates: () => renderUpdates(ctx),
     tasks: () => renderTasks(ctx),
+    storage: () => renderStorage(ctx),
   };
   (views[view] || views.dashboard)();
 }
@@ -90,9 +93,9 @@ function renderShell() {
       h("div", null, "Proxmox Zentrale", h("small", null, state.node || ""))),
     nodePicker(),
     h("nav", { class: "nav" },
-      NAV.slice(0, 4).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label)),
+      NAV.slice(0, 5).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label)),
       h("div", { class: "nav-section" }, "Pflege"),
-      NAV.slice(4).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label,
+      NAV.slice(5).map(n => h("a", { href: `#/${n.path}`, "data-nav": n.path }, icon(n.icon), n.label,
         n.path === "updates" ? h("span", { class: "badge count hidden", id: "upd-badge" }) : null)),
     ),
     h("div", { class: "sidebar-foot" },
@@ -132,6 +135,7 @@ function openMoreMenu() {
       h("p", { class: "sheet-sub" }, `Angemeldet als ${state.user.username}`),
       nodePicker(),
       h("div", { class: "card pad-0 flat" }, h("div", { class: "list" },
+        item("network", "Speicher & NAS", () => go("storage")),
         item("refresh", "Updates", () => go("updates"), state.updatesCount ? h("span", { class: "badge count" }, state.updatesCount) : null),
         item("list", "Aktivität", () => go("tasks")),
         item("archive", "Sicherungen", () => go("backups")),
@@ -247,6 +251,8 @@ async function afterLogin(user) {
   if (!location.hash || location.hash === "#/") location.hash = "#/dashboard";
   route();
   checkUpdatesQuietly();
+  // App-Katalog im Hintergrund laden → Logos für erkannte Apps
+  api("/scripts").then(r => { setAppIndex(r.data, r.aliases); window.dispatchEvent(new Event("bpui:refresh")); }).catch(() => {});
 }
 
 async function checkUpdatesQuietly() {

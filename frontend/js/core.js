@@ -93,6 +93,7 @@ const P = {
   upload: '<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
+  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>',
 };
@@ -392,9 +393,63 @@ export function setUpdatesCount(n) {
 
 // ---------- Kleinkram ----------
 export function guestTypeLabel(t) { return t === "qemu" ? "VM" : "Container"; }
-export function guestIcon(type, status) {
-  return h("div", { class: `guest-icon ${type === "qemu" ? "vm" : "ct"}` }, icon(type === "qemu" ? "monitor" : "box"),
+export function guestIcon(type, status, name) {
+  const app = name ? detectApp(name) : null;
+  const inner = app ? logoImg(app.logo, () => icon(type === "qemu" ? "monitor" : "box")) : icon(type === "qemu" ? "monitor" : "box");
+  return h("div", { class: `guest-icon ${type === "qemu" ? "vm" : "ct"} ${app ? "has-logo" : ""}`, title: app ? app.title : null }, inner,
     h("span", { class: `status-dot ${status || ""}` }));
+}
+
+// ---------- App-Erkennung & Logos ----------
+let appKeys = [];          // [{key, logo, title}] – längste Schlüssel zuerst
+const appExact = new Map();
+export const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+export function setAppIndex(items, aliases = {}) {
+  appExact.clear();
+  const add = (key, logo, title) => { if (key && logo && !appExact.has(key)) appExact.set(key, { logo, title }); };
+  for (const it of items || []) {
+    if (!it.logo || it.kind === "tool") continue;
+    const base = it.path.split("/").pop().replace(/\.sh$/, "").replace(/-vm$/, "");
+    const title = it.title.replace(/\s*\(.*\)$/, "");
+    add(normName(base), it.logo, title);
+    add(normName(title), it.logo, title);
+    add(normName(it.logo), it.logo, title);
+  }
+  for (const [k, v] of Object.entries(aliases)) add(normName(k), v, v.split("-").map(w => w[0].toUpperCase() + w.slice(1)).join(" "));
+  appKeys = [...appExact.entries()].filter(([k]) => k.length >= 4).map(([key, v]) => ({ key, ...v })).sort((a, b) => b.key.length - a.key.length);
+}
+
+/** Erkennt eine bekannte App am Namen einer Maschine, z. B. "immich-server" → Immich. */
+export function detectApp(...names) {
+  for (const n of names) {
+    const k = normName(n);
+    if (!k) continue;
+    if (appExact.has(k)) return appExact.get(k);
+  }
+  for (const n of names) {
+    const k = normName(n);
+    if (!k) continue;
+    const hit = appKeys.find(a => k.includes(a.key));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function logoImg(slug, fallback) {
+  const img = h("img", { src: `/api/logo/${encodeURIComponent(slug)}`, alt: "", loading: "lazy", decoding: "async" });
+  img.addEventListener("error", () => { const fb = fallback ? fallback() : null; if (fb) img.replaceWith(fb); else img.remove(); }, { once: true });
+  return img;
+}
+
+/** Rundes App-Symbol: Logo, sonst farbige Initialen. */
+export function appAvatar(slug, title, { size = 44, key } = {}) {
+  const initials = String(title || "?").replace(/[^A-Za-z0-9 ]/g, "").split(" ").filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
+  const box = h("div", { class: "app-avatar", style: { width: `${size}px`, height: `${size}px`, fontSize: `${Math.round(size * 0.38)}px` } });
+  const showInitials = () => { box.classList.remove("logo"); box.style.background = colorFor(key || title || "?"); return document.createTextNode(initials); };
+  if (slug) { box.classList.add("logo"); box.append(logoImg(slug, showInitials)); }
+  else box.append(showInitials());
+  return box;
 }
 export function statusBadge(status) {
   const map = { running: ["ok", "Läuft"], stopped: ["", "Aus"], paused: ["warn", "Pausiert"], suspended: ["warn", "Ruhezustand"] };

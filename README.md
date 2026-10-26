@@ -7,6 +7,8 @@ Eine schöne, einfache Oberfläche für **Proxmox VE** – für alle, die ihren 
 - **Maschinen** – Starten, Herunterfahren, Neustart, Einstellungen, Festplatte vergrößern, Snapshots, Löschen
 - **Neu anlegen** – Assistenten für Container (LXC) und VMs (inkl. Windows 11 mit TPM/UEFI), Vorlagen und ISOs per Klick laden
 - **Apps** – über 600 Installationen aus den [Proxmox Community-Scripts](https://community-scripts.github.io/ProxmoxVE/) mit eingebautem Terminal
+- **Speicher & NAS** – zeigt als Schaubild, welche NAS-Freigabe mit welcher App (Immich, Paperless, Jellyfin …) verbunden ist, warnt bei nicht erreichbarer NAS oder wenn eine App versehentlich auf die System-Festplatte schreibt; Assistenten zum Verbinden von SMB/NFS-Freigaben und zum Teilen von Ordnern mit Containern
+- **App-Logos** für erkannte Apps und den ganzen Katalog (Icons von [selfh.st](https://selfh.st/icons/))
 - **Sicherungen** – jetzt sichern, automatische Zeitpläne, Wiederherstellen (als neue Maschine oder Original ersetzen)
 - **Updates** – Proxmox-Updates prüfen und installieren, alle Container aktualisieren, Oberfläche selbst aktualisieren
 - **Nur im Heimnetz erreichbar**, optimiert für Handy und Desktop, hell und dunkel

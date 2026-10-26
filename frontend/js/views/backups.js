@@ -94,7 +94,7 @@ export async function renderBackups({ page, el }) {
       const name = nameOf(id) || (items[0].notes || "").split("\n")[0] || `Maschine #${id}`;
       const exists = guests.some(g => String(g.vmid) === String(id));
       listBox.append(h("div", { class: "card pad-0", style: { marginBottom: "14px" } },
-        h("div", { class: "list-item", style: { background: "var(--surface-2)" } }, guestIcon(type, exists ? guests.find(g => String(g.vmid) === String(id)).status : ""),
+        h("div", { class: "list-item", style: { background: "var(--surface-2)" } }, guestIcon(type, exists ? guests.find(g => String(g.vmid) === String(id)).status : "", name),
           h("div", { class: "grow" }, h("div", { class: "title" }, name), h("div", { class: "meta" }, `#${id} · ${items.length} Sicherung${items.length === 1 ? "" : "en"}${exists ? "" : " · Maschine existiert nicht mehr"}`))),
         h("div", { class: "list" }, items.slice(0, 15).map(b => h("div", { class: "list-item" },
           h("div", { class: "grow" }, h("div", { class: "title", style: { fontWeight: 560 } }, dateTime(b.ctime), b.protected ? h("span", { class: "badge info", style: { marginLeft: "8px" } }, "geschützt") : null),

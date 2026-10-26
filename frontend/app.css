@@ -482,3 +482,31 @@ table.table td { padding: 11px 16px; border-bottom: 1px solid var(--line); }
 table.table tr:last-child td { border-bottom: 0; }
 
 .fade-in { animation: fade .25s ease; }
+
+/* ---------- Logos ---------- */
+.app-avatar.logo { background: #fff; border: 1px solid var(--line); padding: 7px; }
+.app-avatar img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.guest-icon.has-logo { background: #fff; border: 1px solid var(--line); }
+.guest-icon.has-logo img { width: 26px; height: 26px; object-fit: contain; }
+.detail-hero .guest-icon.has-logo img { width: 34px; height: 34px; }
+
+/* ---------- Verbindungs-Diagramm ---------- */
+.flow { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) clamp(60px, 12vw, 160px) minmax(0, 1fr); padding: 20px; overflow: hidden; }
+.flow-lines { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.flow-col { display: flex; flex-direction: column; gap: 12px; justify-content: center; position: relative; z-index: 1; min-width: 0; }
+.flow-head { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 650; margin-bottom: 2px; }
+.flow-node { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); min-width: 0; }
+.flow-node.clickable { cursor: pointer; }
+.flow-node.clickable:hover { border-color: var(--line-strong); }
+.flow-node .title { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-node .meta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-node > div:nth-child(2) { flex: 1; min-width: 0; }
+.flow-node .guest-icon { width: 36px; height: 36px; border-radius: 10px; }
+.flow-node .guest-icon.has-logo img { width: 22px; height: 22px; }
+.flow-node .app-avatar.logo { padding: 6px; }
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "›"; display: inline-block; margin-right: 8px; transition: transform .15s; }
+details[open] > summary::before { transform: rotate(90deg); }
+@media (max-width: 860px) { .hide-sm-block { display: none !important; } }
+h2.section.hide-sm-block { display: flex; }

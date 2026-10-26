@@ -69,7 +69,7 @@ function guestRow(g, go) {
       await powerAction(g.type, g.vmid, running ? "shutdown" : "start", g.name, powerBtn);
     } }, icon(running ? "power" : "play", "sm"), h("span", { class: "hide-sm" }, running ? "Aus" : "Start"));
   return h("div", { class: "list-item clickable", onclick: () => go(`guest/${g.type}/${g.vmid}`) },
-    guestIcon(g.type, g.status),
+    guestIcon(g.type, g.status, g.name),
     h("div", { class: "grow" },
       h("div", { class: "row", style: { gap: "8px" } }, h("div", { class: "title" }, g.name || `#${g.vmid}`), h("span", { class: "badge" }, `#${g.vmid}`)),
       h("div", { class: "meta" }, running
@@ -134,7 +134,7 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
     actions.append(h("a", { class: "btn", href: consoleUrl, target: "_blank", rel: "noopener" }, icon("terminal", "sm"), "Konsole"));
 
     clear(hero).append(
-      h("div", { class: "detail-hero" }, guestIcon(type, status.status),
+      h("div", { class: "detail-hero" }, guestIcon(type, status.status, name),
         h("div", { style: { flex: 1, minWidth: "200px" } },
           h("div", { class: "row wrap", style: { gap: "8px" } }, h("h1", { style: { margin: 0, fontSize: "24px", letterSpacing: "-.02em" } }, name), statusBadge(status.status)),
           h("div", { class: "muted", style: { marginTop: "2px" } }, `${guestTypeLabel(type)} #${vmid}`, h("span", { id: "ip-line" })))),

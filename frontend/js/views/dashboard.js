@@ -84,7 +84,7 @@ export async function renderDashboard({ page, el, go }) {
       active.append(h("div", { class: "list" }, sorted.map(g => {
         const memP2 = pct(g.mem, g.maxmem);
         return h("div", { class: "list-item clickable", onclick: () => go(`guest/${g.type}/${g.vmid}`) },
-          guestIcon(g.type, g.status),
+          guestIcon(g.type, g.status, g.name),
           h("div", { class: "grow" }, h("div", { class: "title" }, g.name || `#${g.vmid}`),
             h("div", { class: "meta" }, g.status === "running" ? `CPU ${num((g.cpu || 0) * 100, 0)} % · RAM ${bytes(g.mem)}` : "Ausgeschaltet")),
           g.status === "running" ? h("div", { style: { width: "70px" } }, meter(memP2, "thin")) : null,

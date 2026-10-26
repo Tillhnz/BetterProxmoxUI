@@ -487,6 +487,18 @@ FEATURED = {
 }
 
 
+try:
+    LOGOS = json.loads((Path(__file__).resolve().parent / "logos.json").read_text())
+except (OSError, ValueError):
+    LOGOS = {"scripts": {}, "aliases": {}, "svg": []}
+
+
+def _logo_for_path(p: str) -> str | None:
+    if p.startswith("tools/"):
+        return "proxmox"
+    return LOGOS["scripts"].get(p.rsplit("/", 1)[1][:-3])
+
+
 def _title_from_path(p: str) -> str:
     name = p.rsplit("/", 1)[1][:-3]
     name = re.sub(r"[-_]+", " ", name).strip()
@@ -526,6 +538,8 @@ async def scripts_catalog(request: Request):
             except OSError:
                 pass
         except Exception:
+            # GitHub nicht erreichbar: in 10 Minuten erneut versuchen, bis dahin Cache/Auswahl nutzen
+            CATALOG_CACHE["time"] = time.time() - 6 * 3600 + 600
             if not CATALOG_CACHE["items"] and cache_file.exists():
                 CATALOG_CACHE["items"] = json.loads(cache_file.read_text())
             if not CATALOG_CACHE["items"]:
@@ -533,7 +547,177 @@ async def scripts_catalog(request: Request):
                     {"path": p, "kind": "vm" if p.startswith("vm/") else ("tool" if p.startswith("tools/") else "ct"),
                      "title": t, "description": d, "category": c, "featured": True}
                     for p, (t, d, c) in FEATURED.items()]
-    return JSONResponse({"data": CATALOG_CACHE["items"], "host_admin": s.host_admin})
+    items = [dict(i, logo=_logo_for_path(i["path"])) for i in CATALOG_CACHE["items"]]
+    return JSONResponse({"data": items, "host_admin": s.host_admin, "aliases": LOGOS["aliases"]})
+
+
+# --------------------------------------------------------------------------
+# App-Logos (selfh.st Icons), werden lokal zwischengespeichert
+# --------------------------------------------------------------------------
+
+LOGO_SLUG = re.compile(r"^[a-z0-9][a-z0-9.-]{0,80}$")
+LOGO_BASE = os.environ.get("BPUI_LOGO_BASE", "https://cdn.jsdelivr.net/gh/selfhst/icons@main")
+
+
+def _fetch_logo_sync(slug: str) -> tuple[bytes, str] | None:
+    cache = STATE_DIR / "logos"
+    cache.mkdir(parents=True, exist_ok=True)
+    for ext, ctype in (("svg", "image/svg+xml"), ("png", "image/png")):
+        f = cache / f"{slug}.{ext}"
+        if f.exists():
+            return f.read_bytes(), ctype
+    if (cache / f"{slug}.missing").exists() and time.time() - (cache / f"{slug}.missing").stat().st_mtime < 7 * 86400:
+        return None
+    for ext, ctype in (("svg", "image/svg+xml"), ("png", "image/png")):
+        try:
+            req = urllib.request.Request(f"{LOGO_BASE}/{ext}/{slug}.{ext}", headers={"User-Agent": "BetterProxmoxUI"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read(512 * 1024)
+            if ext == "svg" and b"<svg" not in data[:2048]:
+                continue
+            (cache / f"{slug}.{ext}").write_bytes(data)
+            return data, ctype
+        except Exception:
+            continue
+    try:
+        (cache / f"{slug}.missing").touch()
+    except OSError:
+        pass
+    return None
+
+
+async def logo(request: Request):
+    slug = request.path_params["slug"]
+    if not LOGO_SLUG.match(slug) or not await get_session(request):
+        return Response(status_code=404)
+    res = await asyncio.to_thread(_fetch_logo_sync, slug)
+    if not res:
+        return Response(status_code=404, headers={"cache-control": "max-age=3600"})
+    data, ctype = res
+    return Response(data, media_type=ctype, headers={
+        "cache-control": "private, max-age=604800",
+        # Fremde SVGs dürfen niemals Skripte ausführen
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    })
+
+
+# --------------------------------------------------------------------------
+# Host-Informationen für NAS-Freigaben (nur für Host-Admins)
+# --------------------------------------------------------------------------
+
+NET_FS = {"cifs", "smb3", "nfs", "nfs4", "fuse.sshfs", "fuse.rclone", "glusterfs", "ceph", "fuse.mergerfs", "9p", "virtiofs"}
+HOST_PATH = re.compile(r"^/(mnt|media)(/[A-Za-z0-9._@+ -]+)*/?$")
+
+
+def _unescape_mount(s: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _disk_usage(path: str) -> dict | None:
+    try:
+        st = os.statvfs(path)
+        return {"total": st.f_blocks * st.f_frsize, "avail": st.f_bavail * st.f_frsize,
+                "used": (st.f_blocks - st.f_bfree) * st.f_frsize}
+    except OSError:
+        return None
+
+
+def _mounts_sync() -> dict:
+    mounts = []
+    with open(os.environ.get("BPUI_MOUNTS_FILE", "/proc/self/mounts")) as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            src, target, fstype, opts = _unescape_mount(parts[0]), _unescape_mount(parts[1]), parts[2], parts[3]
+            if fstype in NET_FS or target.startswith(("/mnt/", "/media/")):
+                mounts.append({"source": src, "target": target, "fstype": fstype, "network": fstype in NET_FS,
+                               "options": re.sub(r"(password|pass|cred[a-z]*)=[^,]*", r"\1=***", opts)})
+    fstab = []
+    try:
+        with open(os.environ.get("BPUI_FSTAB_FILE", "/etc/fstab")) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 3 and (parts[2] in NET_FS or parts[1].startswith(("/mnt/", "/media/"))):
+                    fstab.append({"source": parts[0], "target": parts[1], "fstype": parts[2],
+                                  "mounted": any(m["target"] == parts[1] for m in mounts)})
+    except OSError:
+        pass
+    return {"mounts": mounts, "fstab": fstab, "root": _disk_usage("/")}
+
+
+async def host_mounts(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return _err(403, "Nur für root@pam")
+    data = await asyncio.to_thread(_mounts_sync)
+    # Speicherbelegung der Netzlaufwerke (mit Zeitlimit, falls eine NAS hängt)
+    for m in data["mounts"]:
+        try:
+            m["usage"] = await asyncio.wait_for(asyncio.to_thread(_disk_usage, m["target"]), 3)
+        except asyncio.TimeoutError:
+            m["usage"] = None
+            m["stale"] = True
+    return JSONResponse({"data": data})
+
+
+def _safe_host_path(p: str) -> str | None:
+    if not isinstance(p, str) or not HOST_PATH.match(p) or ".." in p:
+        return None
+    real = os.path.realpath(p)
+    return real if real.startswith(("/mnt/", "/media/")) or real in ("/mnt", "/media") else None
+
+
+def _list_dirs_sync(path: str) -> list[str]:
+    with os.scandir(path) as it:
+        return sorted(e.name for e in it if e.is_dir(follow_symlinks=False) and not e.name.startswith("."))[:500]
+
+
+async def host_ls(request: Request):
+    s = await get_session(request)
+    if not s or not s.host_admin:
+        return _err(403, "Nur für root@pam")
+    path = _safe_host_path(request.query_params.get("path", ""))
+    if not path:
+        return _err(400, "Nur Ordner unter /mnt oder /media sind erlaubt")
+    try:
+        dirs = await asyncio.wait_for(asyncio.to_thread(_list_dirs_sync, path), 5)
+    except asyncio.TimeoutError:
+        return _err(504, "Die NAS antwortet nicht.")
+    except FileNotFoundError:
+        return _err(404, "Ordner existiert nicht")
+    except OSError as e:
+        return _err(400, f"Ordner kann nicht gelesen werden: {e.strerror}")
+    return JSONResponse({"data": {"path": path, "dirs": dirs}})
+
+
+async def host_mkdir(request: Request):
+    s = await get_session(request)
+    if not s or not s.host_admin:
+        return _err(403, "Nur für root@pam")
+    body = await request.json()
+    path = body.get("path", "")
+    parent = _safe_host_path(os.path.dirname(path.rstrip("/")))
+    name = os.path.basename(path.rstrip("/"))
+    if not parent or not re.match(r"^[A-Za-z0-9._@+ -]{1,100}$", name or "") or name in (".", ".."):
+        return _err(400, "Ungültiger Ordnername")
+    target = os.path.join(parent, name)
+    try:
+        await asyncio.wait_for(asyncio.to_thread(os.makedirs, target, 0o777, True), 5)
+        try:
+            os.chmod(target, 0o777)
+        except OSError:
+            pass
+    except asyncio.TimeoutError:
+        return _err(504, "Die NAS antwortet nicht.")
+    except OSError as e:
+        return _err(400, f"Ordner konnte nicht angelegt werden: {e.strerror}")
+    return JSONResponse({"data": {"path": target}})
 
 
 # --------------------------------------------------------------------------
@@ -793,6 +977,10 @@ routes = [
     Route("/api/logout", logout, methods=["POST"]),
     Route("/api/me", me),
     Route("/api/scripts", scripts_catalog),
+    Route("/api/logo/{slug}", logo),
+    Route("/api/host/mounts", host_mounts),
+    Route("/api/host/ls", host_ls),
+    Route("/api/host/mkdir", host_mkdir, methods=["POST"]),
     Route("/api/jobs", jobs_list, methods=["GET"]),
     Route("/api/jobs", jobs_create, methods=["POST"]),
     Route("/api/jobs/{job_id}/kill", jobs_kill, methods=["POST"]),
