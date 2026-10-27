@@ -597,3 +597,16 @@ export function lineChart(rows, series, opts = {}) {
 export function chartCard(title, chartEl, sub) {
   return h("div", { class: "card" }, h("div", { class: "row", style: { marginBottom: "6px" } }, h("h3", { style: { margin: 0 } }, title), sub ? h("span", { class: "muted small", style: { marginLeft: "auto" } }, sub) : null), chartEl);
 }
+
+// ---------- Sicherung herunterladen ----------
+export function backupDownloadUrl(volid, node = state.node) {
+  return `/api/backups/download?node=${encodeURIComponent(node)}&volid=${encodeURIComponent(volid)}`;
+}
+/** Download-Knopf für eine Sicherung – oder null, wenn das nicht geht (kein root, Backup-Server). */
+export function backupDownloadBtn(b, storeType, { label = null } = {}) {
+  if (!state.user?.host_admin || storeType === "pbs") return null;
+  const a = h("a", { class: "btn sm", href: backupDownloadUrl(b.volid), download: String(b.volid).split("/").pop(),
+    title: `Herunterladen (${bytes(b.size)})` }, icon("download", "sm"), label ? h("span", null, label) : h("span", { class: "hide-sm" }, "Herunterladen"));
+  a.addEventListener("click", () => toast("Download startet", `${bytes(b.size)} – das kann je nach Größe etwas dauern.`, "info"));
+  return a;
+}

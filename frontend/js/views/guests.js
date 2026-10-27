@@ -2,6 +2,7 @@ import {
   h, icon, clear, pve, state, bytes, pct, uptime, meter, num, guestIcon, statusBadge, callout, loader, nodePath, enc,
   toast, errorToast, trackTask, confirmDialog, openSheet, field, input, select, toggle, withBusy, pageHead, empty, relTime,
   guestTypeLabel, dateTime, api, lockBadge, LOCK_TEXT, taskName, parseUpid,
+  backupDownloadBtn,
 } from "../core.js";
 import { statsSection, sizingSection, hardwareCard, optionsCard, actionsCard, historyCard } from "./guestExtra.js";
 
@@ -349,11 +350,12 @@ function backupCard(type, vmid, name) {
       const stores = await pve("GET", nodePath("/storage"), { content: "backup", enabled: 1 });
       let all = [];
       for (const s of stores) {
-        try { all = all.concat(await pve("GET", nodePath(`/storage/${enc(s.storage)}/content`), { content: "backup", vmid })); } catch { /* egal */ }
+        try { all = all.concat((await pve("GET", nodePath(`/storage/${enc(s.storage)}/content`), { content: "backup", vmid })).map(b => ({ ...b, storeType: s.type }))); } catch { /* egal */ }
       }
       all.sort((a, b) => (b.ctime || 0) - (a.ctime || 0));
       clear(listEl).append(all.length
-        ? h("span", null, `${all.length} Sicherung${all.length === 1 ? "" : "en"} vorhanden · letzte ${relTime(all[0].ctime)} (${bytes(all[0].size)}). `, h("a", { href: "#/backups" }, "Verwalten"))
+        ? h("div", null, h("div", null, `${all.length} Sicherung${all.length === 1 ? "" : "en"} vorhanden · letzte ${relTime(all[0].ctime)} (${bytes(all[0].size)}). `, h("a", { href: "#/backups" }, "Verwalten")),
+            h("div", { style: { marginTop: "10px" } }, backupDownloadBtn(all[0], all[0].storeType, { label: "Neueste herunterladen" })))
         : "Für diese Maschine gibt es noch keine Sicherung.");
     } catch (e) { clear(listEl).append(e.message); }
   })();

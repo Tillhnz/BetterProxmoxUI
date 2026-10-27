@@ -1,6 +1,7 @@
 import {
   h, icon, clear, pve, state, bytes, nodePath, enc, toast, errorToast, trackTask, openSheet, confirmDialog, field, input, select,
   toggle, segmented, withBusy, pageHead, callout, loader, empty, dateTime, relTime, guestIcon,
+  backupDownloadBtn,
 } from "../core.js";
 import { backupNowSheet } from "./guests.js";
 
@@ -41,6 +42,7 @@ export async function renderBackups({ page, el }) {
 
   let guests = [];
   let backupStores = [];
+  const storeType = new Map();
   const nameOf = (vmid) => guests.find(g => String(g.vmid) === String(vmid))?.name;
 
   nowBtn.addEventListener("click", () => chooseGuestsSheet(guests));
@@ -80,6 +82,7 @@ export async function renderBackups({ page, el }) {
       try {
         const items = await pve("GET", nodePath(`/storage/${enc(s.storage)}/content`), { content: "backup" });
         all.push(...items.map(i => ({ ...i, store: s.storage })));
+        storeType.set(s.storage, s.type);
       } catch { /* egal */ }
     }
     clear(listBox);
@@ -100,7 +103,8 @@ export async function renderBackups({ page, el }) {
           h("div", { class: "grow" }, h("div", { class: "title", style: { fontWeight: 560 } }, dateTime(b.ctime), b.protected ? h("span", { class: "badge info", style: { marginLeft: "8px" } }, "geschützt") : null),
             h("div", { class: "meta" }, `${relTime(b.ctime)} · ${bytes(b.size)} · ${b.store}`)),
           h("div", { class: "end" },
-            h("button", { class: "btn sm", onclick: () => restoreSheet(b, type, id, name, exists, guests) }, icon("restart", "sm"), h("span", null, "Wiederherstellen")),
+            h("button", { class: "btn sm", title: "Wiederherstellen", onclick: () => restoreSheet(b, type, id, name, exists, guests) }, icon("restart", "sm"), h("span", { class: "hide-sm" }, "Wiederherstellen")),
+            backupDownloadBtn(b, storeType.get(b.store)),
             h("button", { class: "btn sm icon ghost", title: "Löschen", onclick: async () => {
               if (b.protected) return toast("Geschützte Sicherung", "Diese Sicherung ist geschützt und kann nicht gelöscht werden.", "bad");
               if (!await confirmDialog({ title: "Sicherung löschen?", text: `Sicherung vom ${dateTime(b.ctime)} von „${name}“ wird endgültig gelöscht.`, confirmText: "Löschen", danger: true })) return;

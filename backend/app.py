@@ -1238,6 +1238,50 @@ async def tls_proxmox(request: Request):
     return JSONResponse({"ok": True})
 
 
+# --------------------------------------------------------------------------
+# Sicherungen herunterladen
+# --------------------------------------------------------------------------
+
+BACKUP_VOLID = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*:backup/[A-Za-z0-9._+-]+$")
+LOCAL_NODE = os.uname().nodename.split(".")[0]
+
+
+async def backup_download(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return _err(403, "Sicherungen herunterladen darf nur root@pam – sie enthalten alle Daten der Maschine.")
+    volid = request.query_params.get("volid", "")
+    node = request.query_params.get("node", "") or LOCAL_NODE
+    if not BACKUP_VOLID.match(volid) or ".." in volid or not re.fullmatch(r"[A-Za-z0-9.-]+", node):
+        return _err(400, "Ungültige Sicherung")
+    storage = volid.split(":", 1)[0]
+    q = urllib.parse.quote
+    # 1) Proxmox bestätigt, dass es die Sicherung gibt und der Benutzer sie sehen darf
+    try:
+        await pve_call("GET", f"/nodes/{q(node)}/storage/{q(storage)}/content/{q(volid, safe='')}", s.ticket, s.csrf)
+        _, cfg = await pve_call("GET", f"/storage/{q(storage)}", s.ticket, s.csrf)
+    except PveError as e:
+        return _err(404 if e.status in (400, 404, 500) else e.status, "Sicherung nicht gefunden")
+    cfg = cfg.get("data") or {}
+    if cfg.get("type") == "pbs":
+        return _err(400, "Sicherungen auf einem Proxmox Backup Server liegen nicht als einzelne Datei vor. Herunterladen geht dort über die Oberfläche des Backup-Servers.")
+    if node != LOCAL_NODE and not cfg.get("shared"):
+        return _err(400, f"Diese Sicherung liegt auf dem Server „{node}“. Bitte die Oberfläche auf diesem Server öffnen.")
+    # 2) Pfad auf dem Server ermitteln
+    try:
+        proc = await asyncio.create_subprocess_exec("pvesm", "path", volid, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, _ = await asyncio.wait_for(proc.communicate(), 30)
+    except (FileNotFoundError, asyncio.TimeoutError):
+        return _err(500, "Speicherort der Sicherung konnte nicht ermittelt werden")
+    path = out.decode(errors="replace").strip()
+    if proc.returncode != 0 or not path.startswith("/") or not os.path.isfile(path):
+        return _err(404, "Die Sicherungsdatei wurde auf dem Server nicht gefunden.")
+    return FileResponse(path, filename=os.path.basename(path), media_type="application/octet-stream",
+                        headers={"cache-control": "no-store", "x-content-type-options": "nosniff"})
+
+
 async def health(request: Request):
     return JSONResponse({"ok": True, "version": VERSION})
 
@@ -1245,6 +1289,7 @@ async def health(request: Request):
 routes = [
     Route("/api/health", health),
     Route("/api/tls", tls_info),
+    Route("/api/backups/download", backup_download),
     Route("/api/tls/ca.crt", tls_ca_download),
     Route("/api/tls/proxmox", tls_proxmox, methods=["POST", "DELETE"]),
     Route("/api/realms", realms),
