@@ -52,8 +52,13 @@ command -v pveversion >/dev/null 2>&1 || die "Das ist kein Proxmox-VE-Server (pv
 # ---------------------------------------------------------------------------
 if [[ $MODE == "uninstall" ]]; then
   step "Entferne Proxmox Zentrale …"
-  systemctl disable --now "$SERVICE" 2>/dev/null || true
-  rm -f "/etc/systemd/system/${SERVICE}.service"
+  systemctl disable --now "$SERVICE" "${SERVICE}-cert.timer" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${SERVICE}.service" "/etc/systemd/system/${SERVICE}-cert.service" "/etc/systemd/system/${SERVICE}-cert.timer"
+  # Falls die Proxmox-Oberfläche unser Heimnetz-Zertifikat nutzt: Standard wiederherstellen
+  if [[ -f /etc/pve/local/pveproxy-ssl.pem ]] && openssl x509 -in /etc/pve/local/pveproxy-ssl.pem -noout -issuer 2>/dev/null | grep -q "Proxmox Zentrale CA"; then
+    rm -f /etc/pve/local/pveproxy-ssl.pem /etc/pve/local/pveproxy-ssl.key
+    systemctl restart pveproxy || true
+  fi
   systemctl daemon-reload
   rm -rf "$INSTALL_DIR" "$STATE_DIR"
   rm -f "$ENV_FILE"
@@ -70,7 +75,7 @@ echo
 step "Benötigte Pakete installieren …"
 export DEBIAN_FRONTEND=noninteractive
 NEED=()
-for p in git python3 python3-venv curl ca-certificates; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
+for p in git python3 python3-venv curl ca-certificates openssl; do dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p"); done
 if ((${#NEED[@]})); then
   apt-get update -qq || true
   apt-get install -y -qq "${NEED[@]}" >/dev/null
@@ -127,6 +132,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
 BPUI_BIND=${BIND_IP}
 BPUI_PORT=8443
 
+# Leitet http://<IP> (Port 80) automatisch auf https:// um. 0 = aus
+BPUI_HTTP_PORT=80
+
 # Zusätzlich erlaubte Netze (kommagetrennt). Private Netze (192.168.x.x, 10.x.x.x,
 # 172.16-31.x.x) sind immer erlaubt. Beispiel Tailscale: 100.64.0.0/10
 BPUI_ALLOW_NETS=
@@ -171,9 +179,32 @@ KillMode=mixed
 [Install]
 WantedBy=multi-user.target
 EOF
-chmod +x "$INSTALL_DIR/bin/start.sh" "$INSTALL_DIR/install.sh"
+cat > "/etc/systemd/system/${SERVICE}-cert.service" <<UNIT
+[Unit]
+Description=Proxmox Zentrale: HTTPS-Zertifikat prüfen und erneuern
+
+[Service]
+Type=oneshot
+EnvironmentFile=${ENV_FILE}
+Environment=BPUI_STATE_DIR=${STATE_DIR}
+ExecStart=/usr/bin/env bash ${INSTALL_DIR}/bin/cert.sh --renew
+UNIT
+cat > "/etc/systemd/system/${SERVICE}-cert.timer" <<UNIT
+[Unit]
+Description=Proxmox Zentrale: HTTPS-Zertifikat täglich prüfen
+
+[Timer]
+OnCalendar=*-*-* 04:17
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+chmod +x "$INSTALL_DIR/bin/start.sh" "$INSTALL_DIR/bin/cert.sh" "$INSTALL_DIR/install.sh"
 systemctl daemon-reload
 systemctl enable -q "$SERVICE"
+systemctl enable -q --now "${SERVICE}-cert.timer"
 systemctl restart "$SERVICE"
 
 for _ in $(seq 1 20); do
@@ -189,12 +220,16 @@ ok "Dienst läuft"
 # ---------------------------------------------------------------------------
 if command -v pve-firewall >/dev/null 2>&1 && pve-firewall status 2>/dev/null | grep -q "enabled/running"; then
   echo
-  echo "  ${C_ERR}Hinweis:${C_OFF} Die Proxmox-Firewall ist aktiv. Erlaube ggf. Port ${BPUI_PORT}/tcp"
+  echo "  ${C_ERR}Hinweis:${C_OFF} Die Proxmox-Firewall ist aktiv. Erlaube ggf. Port ${BPUI_PORT}/tcp (und 80/tcp für die Weiterleitung)"
   echo "  unter Rechenzentrum → Firewall (Quelle: dein Heimnetz)."
 fi
 
 echo
 ok "Fertig! Öffne im Browser:  ${C_INFO}https://${BPUI_BIND}:${BPUI_PORT}${C_OFF}"
-echo "  ${C_DIM}Anmeldung mit deinen normalen Proxmox-Zugangsdaten. Der Browser warnt beim ersten Mal"
-echo "  vor dem Zertifikat – das ist dasselbe wie bei der Proxmox-Seite und kann bestätigt werden.${C_OFF}"
+if [[ "${BPUI_HTTP_PORT:-80}" != "0" ]]; then
+  echo "  ${C_DIM}Kurzform: einfach ${BPUI_BIND} eintippen – du wirst automatisch zu https:// weitergeleitet.${C_OFF}"
+fi
+echo "  ${C_DIM}Anmeldung mit deinen normalen Proxmox-Zugangsdaten."
+echo "  Beim ersten Mal zeigt der Browser „Nicht sicher“: Das Heimnetz-Zertifikat einmal pro Gerät"
+echo "  installieren, dann ist die Warnung weg. Anleitung: Anmeldeseite → „Browser zeigt Nicht sicher?“${C_OFF}"
 echo

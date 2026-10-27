@@ -12,7 +12,10 @@ Eine schlanke Starlette-App, die auf dem Proxmox-Host läuft und
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
+import logging
+import subprocess
 import ipaddress
 import json
 import os
@@ -63,6 +66,18 @@ COOKIE_SECURE = os.environ.get("BPUI_COOKIE_SECURE", "1") == "1"
 
 COOKIE = "bpui_sid"
 ALLOWED_NETS = [ipaddress.ip_network(n, strict=False) for n in EXTRA_NETS]
+
+# Vorgeschalteter Empfänger (siehe "Front" weiter unten)
+FRONT = os.environ.get("BPUI_FRONT") == "1"
+PUBLIC_BIND = os.environ.get("BPUI_BIND", "0.0.0.0") or "0.0.0.0"
+PUBLIC_PORT = int(os.environ.get("BPUI_PORT", "8443"))
+HTTP_PORT = int(os.environ.get("BPUI_HTTP_PORT", "80") or 0)
+INTERNAL_PORT = int(os.environ.get("BPUI_INTERNAL_PORT", "8442"))
+TLS_CERT = os.environ.get("BPUI_TLS_CERT", "")
+TLS_MODE = os.environ.get("BPUI_TLS_MODE", "")
+PVE_CUSTOM_CERT = "/etc/pve/local/pveproxy-ssl.pem"
+PVE_CUSTOM_KEY = "/etc/pve/local/pveproxy-ssl.key"
+log = logging.getLogger("bpui")
 
 # --------------------------------------------------------------------------
 # Proxmox-API-Client (nur Standardbibliothek, läuft in Threads)
@@ -250,6 +265,10 @@ class GuardMiddleware:
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
         client = scope.get("client")
+        if client and client[0] == "127.0.0.1" and client[1] in FRONT_CLIENTS:
+            # Verbindung kam über den vorgeschalteten Empfänger → echte Adresse einsetzen
+            client = (FRONT_CLIENTS[client[1]], 0)
+            scope["client"] = client
         if not _ip_allowed(client[0] if client else None):
             if scope["type"] == "http":
                 return await PlainTextResponse("Nur aus dem lokalen Netzwerk erreichbar.", 403)(scope, receive, send)
@@ -1035,12 +1054,199 @@ async def index(request: Request):
     return FileResponse(FRONTEND_DIR / "index.html", headers={"cache-control": "no-cache"})
 
 
+# --------------------------------------------------------------------------
+# Front: nimmt auf dem öffentlichen Port an. TLS wird an uvicorn (127.0.0.1)
+# durchgereicht, Klartext-HTTP bekommt eine Umleitung auf https://.
+# --------------------------------------------------------------------------
+
+FRONT_CLIENTS: dict[int, str] = {}   # lokaler Port der internen Verbindung → echte Client-IP
+HOST_HEADER = re.compile(r"^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:\d{1,5})?$")
+
+
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, OSError, asyncio.CancelledError):
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+
+
+async def _redirect(reader, writer, first: bytes):
+    data = first
+    with contextlib.suppress(Exception):
+        while b"\r\n\r\n" not in data and len(data) < 8192:
+            more = await asyncio.wait_for(reader.read(4096), 5)
+            if not more:
+                break
+            data += more
+    lines = data.split(b"\r\n")
+    parts = lines[0].decode("latin-1", "replace").split(" ")
+    path = parts[1] if len(parts) > 1 and parts[1].startswith("/") and len(parts[1]) < 2000 else "/"
+    host = ""
+    for line in lines[1:]:
+        if line.lower().startswith(b"host:"):
+            host = line[5:].strip().decode("latin-1", "replace")
+            break
+    m = HOST_HEADER.match(host)
+    if m:
+        host = m.group(1)
+    else:
+        sock = writer.get_extra_info("sockname")
+        host = sock[0] if sock else PUBLIC_BIND
+    location = f"https://{host}{'' if PUBLIC_PORT == 443 else f':{PUBLIC_PORT}'}{path}"
+    body = (f"<!doctype html><meta charset=utf-8><title>Weiterleitung</title>"
+            f"<p>Diese Seite gibt es nur verschlüsselt: <a href=\"{location}\">{location}</a></p>").encode()
+    writer.write(b"HTTP/1.1 301 Moved Permanently\r\nLocation: " + location.encode("latin-1", "replace") +
+                 b"\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + str(len(body)).encode() +
+                 b"\r\nConnection: close\r\n\r\n" + body)
+    with contextlib.suppress(Exception):
+        await writer.drain()
+        writer.close()
+
+
+async def _front_handle(reader, writer, tls_port: bool):
+    peer = writer.get_extra_info("peername")
+    ip = peer[0] if peer else None
+    if ip and ip.startswith("::ffff:"):
+        ip = ip[7:]
+    if not _ip_allowed(ip):
+        writer.close()
+        return
+    try:
+        first = await asyncio.wait_for(reader.read(4096), 15)
+    except (asyncio.TimeoutError, ConnectionError, OSError):
+        writer.close()
+        return
+    if not first:
+        writer.close()
+        return
+    if first[0] != 0x16 or not tls_port:      # 0x16 = Beginn eines TLS-Handshakes
+        await _redirect(reader, writer, first)
+        return
+    try:
+        up_r, up_w = await asyncio.open_connection("127.0.0.1", INTERNAL_PORT)
+    except OSError:
+        writer.close()
+        return
+    lport = up_w.get_extra_info("sockname")[1]
+    FRONT_CLIENTS[lport] = ip
+    try:
+        up_w.write(first)
+        await up_w.drain()
+        await asyncio.gather(_pipe(reader, up_w), _pipe(up_r, writer))
+    finally:
+        FRONT_CLIENTS.pop(lport, None)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    servers = []
+    if FRONT:
+        servers.append(await asyncio.start_server(lambda r, w: _front_handle(r, w, True), PUBLIC_BIND, PUBLIC_PORT, reuse_address=True))
+        if HTTP_PORT and HTTP_PORT != PUBLIC_PORT:
+            try:
+                servers.append(await asyncio.start_server(lambda r, w: _front_handle(r, w, False), PUBLIC_BIND, HTTP_PORT, reuse_address=True))
+            except OSError as e:
+                log.warning("Port %s für die http→https-Weiterleitung ist belegt (%s) – übersprungen.", HTTP_PORT, e)
+    try:
+        yield
+    finally:
+        for srv in servers:
+            srv.close()
+
+
+# --------------------------------------------------------------------------
+# HTTPS-Zertifikat: Infos, CA zum Herunterladen, optional auch für Proxmox
+# --------------------------------------------------------------------------
+
+def _tls_dir() -> Path:
+    return STATE_DIR / "tls"
+
+
+def _cert_info(path: str) -> dict | None:
+    try:
+        d = ssl._ssl._test_decode_cert(path)  # noqa: SLF001 – liefert die Felder ohne Zusatzpakete
+    except Exception:
+        return None
+    flat = lambda rdn: {k: v for part in rdn for (k, v) in part}  # noqa: E731
+    return {
+        "subject": flat(d.get("subject", ())).get("commonName", ""),
+        "issuer": flat(d.get("issuer", ())).get("commonName", ""),
+        "issuer_org": flat(d.get("issuer", ())).get("organizationName", ""),
+        "not_after": ssl.cert_time_to_seconds(d["notAfter"]) if d.get("notAfter") else None,
+        "names": [v for (_, v) in d.get("subjectAltName", ())],
+    }
+
+
+def _is_ours(path: str) -> bool:
+    info = _cert_info(path) if os.path.exists(path) else None
+    return bool(info and info["issuer"].startswith("Proxmox Zentrale CA"))
+
+
+async def tls_info(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    ca = _tls_dir() / "ca.pem"
+    pve_custom = os.path.exists(PVE_CUSTOM_CERT)
+    return JSONResponse({"data": {
+        "mode": TLS_MODE or ("dev" if not FRONT else "unknown"),
+        "cert": _cert_info(TLS_CERT) if TLS_CERT else None,
+        "ca": _cert_info(str(ca)) if ca.exists() else None,
+        "proxmox": "ours" if pve_custom and _is_ours(PVE_CUSTOM_CERT) else ("custom" if pve_custom else "default"),
+        "http_port": HTTP_PORT, "port": PUBLIC_PORT, "host_admin": s.host_admin,
+    }})
+
+
+async def tls_ca_download(request: Request):
+    # Öffentlich (nur im Heimnetz): Zertifikate sind keine Geheimnisse, nur der Schlüssel wäre es.
+    ca = _tls_dir() / "ca.pem"
+    if not ca.exists():
+        return PlainTextResponse("Noch keine Zertifizierungsstelle vorhanden.", 404)
+    return Response(ca.read_bytes(), media_type="application/x-x509-ca-cert", headers={
+        "content-disposition": 'attachment; filename="proxmox-zentrale-ca.crt"', "cache-control": "no-cache"})
+
+
+async def tls_proxmox(request: Request):
+    """Nutzt das eigene Zertifikat auch für die Proxmox-Oberfläche (Port 8006) – oder nimmt das zurück."""
+    s = await get_session(request)
+    if not s or not s.host_admin:
+        return _err(403, "Nur für root@pam")
+    if os.path.exists(PVE_CUSTOM_CERT) and not _is_ours(PVE_CUSTOM_CERT):
+        return _err(409, "Proxmox nutzt bereits ein eigenes Zertifikat (z. B. Let's Encrypt). Das wird nicht überschrieben.")
+    tls = _tls_dir()
+    try:
+        if request.method == "POST":
+            if not (tls / "cert.pem").exists():
+                return _err(400, "Kein eigenes Zertifikat vorhanden.")
+            Path(PVE_CUSTOM_CERT).write_bytes((tls / "cert.pem").read_bytes())
+            Path(PVE_CUSTOM_KEY).write_bytes((tls / "key.pem").read_bytes())
+        else:
+            for f in (PVE_CUSTOM_CERT, PVE_CUSTOM_KEY):
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(f)
+        await asyncio.to_thread(subprocess.run, ["systemctl", "restart", "pveproxy"], timeout=60, check=False)
+    except OSError as e:
+        return _err(500, f"Konnte das Zertifikat nicht setzen: {e.strerror}")
+    return JSONResponse({"ok": True})
+
+
 async def health(request: Request):
     return JSONResponse({"ok": True, "version": VERSION})
 
 
 routes = [
     Route("/api/health", health),
+    Route("/api/tls", tls_info),
+    Route("/api/tls/ca.crt", tls_ca_download),
+    Route("/api/tls/proxmox", tls_proxmox, methods=["POST", "DELETE"]),
     Route("/api/realms", realms),
     Route("/api/login", login, methods=["POST"]),
     Route("/api/login/tfa", login_tfa, methods=["POST"]),
@@ -1062,4 +1268,4 @@ routes = [
     Mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static"),
 ]
 
-app = Starlette(routes=routes, middleware=[Middleware(GuardMiddleware)])
+app = Starlette(routes=routes, middleware=[Middleware(GuardMiddleware)], lifespan=lifespan)

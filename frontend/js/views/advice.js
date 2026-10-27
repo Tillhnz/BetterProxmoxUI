@@ -7,6 +7,7 @@ import {
 } from "../core.js";
 import { unlockFlow } from "./guests.js";
 import { analyzeAll, applySizing } from "../sizing.js";
+import { tlsGuideSheet } from "./tls.js";
 
 const LEVELS = {
   bad: { label: "Dringend", order: 0, cls: "bad", ico: "alert" },
@@ -276,6 +277,17 @@ export async function runChecks({ force = false } = {}) {
         todo: `Ein langes, einzigartiges root-Passwort verwenden und SSH nie ins Internet freigeben.${host.fail2ban ? "" : " Optional fail2ban installieren, das wiederholte Fehlversuche sperrt."} Für Fortgeschrittene: Anmeldung per SSH-Schlüssel und PasswordAuthentication no.` });
     }
   }
+  const tls = await settle(api("/tls").then(r => r.data));
+  if (location.protocol !== "https:") add({ id: "tls-http", level: "bad", cat: "sicherheit", title: "Die Oberfläche wird unverschlüsselt aufgerufen",
+    why: "Passwörter würden im Klartext durchs Netz gehen.", todo: "Die Adresse mit https:// aufrufen." });
+  else if (tls?.mode === "own") add({ id: "tls-trust", level: "info", cat: "sicherheit", title: "Browser-Warnung „Nicht sicher“ abschalten",
+    why: "Die Verbindung ist verschlüsselt. Der Browser warnt nur, solange er dein Heimnetz-Zertifikat nicht kennt.",
+    todo: "Das Zertifikat einmal auf jedem Gerät installieren, mit dem du die Oberfläche nutzt – dauert eine Minute.",
+    actions: [{ label: "Anleitung öffnen", run: async () => tlsGuideSheet() }] });
+  else if (tls?.mode === "pve") add({ id: "tls-pve", level: "warn", cat: "sicherheit", title: "Kein eigenes HTTPS-Zertifikat",
+    why: "Ein Heimnetz-Zertifikat konnte nicht erstellt werden. Die Verbindung ist verschlüsselt, aber der Browser warnt dauerhaft.",
+    todo: "Prüfe unter „Server“ den Abschnitt „Sichere Verbindung“ oder richte in Proxmox ein Zertifikat (z. B. Let's Encrypt) ein.", actions: [{ label: "Zum Server", href: "#/node" }] });
+
   add({ id: "tip-passwords", level: "info", cat: "sicherheit", title: "Starke, einzigartige Passwörter",
     why: "Proxmox, NAS und Apps sollten jeweils ein eigenes Passwort haben – wird eins bekannt, bleiben die anderen sicher.",
     todo: "Einen Passwort-Manager nutzen – z. B. Vaultwarden, den du über „Apps“ selbst hosten kannst.", actions: [{ label: "Vaultwarden ansehen", href: "#/apps" }] });

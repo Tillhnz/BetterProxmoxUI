@@ -5,6 +5,7 @@ import {
   h, icon, clear, api, pve, state, bytes, uptime, nodePath, enc, errorToast, trackTask, openSheet, confirmDialog,
   withBusy, pageHead, callout, loader, segmented,
 } from "../core.js";
+import { tlsCard } from "./tls.js";
 
 const SERVICE_DE = {
   pveproxy: "Weboberfläche (Proxmox)", pvedaemon: "Proxmox-Hintergrunddienst", pvestatd: "Statistik-Sammler", "pve-cluster": "Cluster-Dateisystem",
@@ -19,7 +20,7 @@ export async function renderNode({ page, el, go }) {
   const info = h("div", { class: "card" }, loader());
   const tabs = h("div", { style: { margin: "18px 0 14px" } });
   const body = h("div");
-  el.append(info, tabs, body);
+  el.append(info, tlsCard(), tabs, body);
 
   // ---------- Kopf: Systeminfos & Aktionen ----------
   (async () => {

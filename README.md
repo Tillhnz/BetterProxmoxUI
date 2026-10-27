@@ -27,7 +27,16 @@ Auf dem Proxmox-Server als `root` (z. B. über *Server → Shell* in Proxmox):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Tillhnz/BetterProxmoxUI/main/install.sh)"
 ```
 
-Danach im Browser öffnen: `https://<IP-deines-Servers>:8443`
+Danach im Browser öffnen: `https://<IP-deines-Servers>:8443` – oder einfach nur die IP-Adresse eintippen, du wirst automatisch auf https:// weitergeleitet.
+
+### HTTPS ohne Browser-Warnung
+
+Die Oberfläche ist immer verschlüsselt. Damit der Browser nicht „Nicht sicher“ anzeigt, erstellt die Installation ein **eigenes Heimnetz-Zertifikat**. Das installierst du einmal pro Gerät (Anleitung für Windows, Mac, iPhone, Android und Linux direkt auf der Anmeldeseite unter „Browser zeigt Nicht sicher?“ und unter **Server → Sichere Verbindung**).
+
+- Die Zertifizierungsstelle ist per *Name Constraints* auf private IP-Adressen und Heimnetz-Namen (`.local`, `.lan`, `.home.arpa`, `.internal`, Servername) beschränkt. Selbst mit ihrem Schlüssel ließen sich keine echten Webseiten fälschen.
+- Das Zertifikat erneuert sich automatisch (täglicher Check), auch wenn sich die IP-Adresse ändert.
+- Auf Wunsch nutzt auch die normale Proxmox-Oberfläche (Port 8006) dasselbe Zertifikat – ein Klick unter **Server**, jederzeit rückgängig.
+- Hast du in Proxmox schon ein eigenes Zertifikat (z. B. Let's Encrypt über ACME), wird automatisch dieses verwendet.
 
 > Das Repository muss öffentlich sein, damit der Server es ohne Zugangsdaten laden kann.
 
@@ -44,6 +53,7 @@ Datei `/etc/better-proxmox-ui.env`, danach `systemctl restart better-proxmox-ui`
 | Einstellung | Bedeutung |
 |---|---|
 | `BPUI_BIND` / `BPUI_PORT` | IP-Adresse und Port (Standard: LAN-IP, 8443) |
+| `BPUI_HTTP_PORT` | Port für die Weiterleitung von http:// auf https:// (Standard 80, `0` = aus) |
 | `BPUI_ALLOW_NETS` | Zusätzliche erlaubte Netze, z. B. `100.64.0.0/10` für Tailscale |
 | `BPUI_HOST_ACTIONS` | `0` schaltet Apps, Updates und Host-Konsole ab |
 | `BPUI_HOST_ADMINS` | Wer Host-Aktionen ausführen darf (Standard `root@pam`) |
@@ -52,7 +62,7 @@ Datei `/etc/better-proxmox-ui.env`, danach `systemctl restart better-proxmox-ui`
 
 - Alle Aktionen laufen über die Proxmox-API **mit den Rechten des angemeldeten Benutzers** – die Oberfläche kann nichts, was der Benutzer in Proxmox nicht auch darf.
 - Zugriff nur aus privaten Netzen (192.168.x.x, 10.x.x.x, 172.16–31.x.x); alles andere wird abgewiesen.
-- HTTPS mit demselben Zertifikat wie die Proxmox-Weboberfläche.
+- Immer HTTPS – mit eigenem, auf das Heimnetz beschränktem Zertifikat; versehentliches http:// wird umgeleitet.
 - Sitzungs-Cookie `HttpOnly`/`SameSite=Strict`, CSRF-Schutz, Sperre nach 10 Fehlversuchen.
 - **Apps installieren, Proxmox-Updates und die Host-Konsole** brauchen Root-Rechte auf dem Server. Deshalb läuft der Dienst als root, und diese Funktionen sind – wie in Proxmox selbst – nur für `root@pam` freigeschaltet.
 - Die App-Skripte stammen vom Community-Projekt *community-scripts*, nicht von Proxmox.
@@ -76,7 +86,8 @@ Cluster & Hochverfügbarkeit, Firewall-Regeln, Netzwerk ändern/SDN, Festplatten
 ```
 backend/app.py      Starlette-Server: Login, API-Weiterleitung, Skript-Katalog, Terminal-Jobs
 frontend/           Oberfläche (reines JavaScript, kein Build-Schritt nötig)
-bin/start.sh        Startet den Server mit dem Proxmox-Zertifikat
+bin/start.sh        Startet den Server (HTTPS, Weiterleitung von http://)
+bin/cert.sh         Erstellt und erneuert das Heimnetz-Zertifikat
 install.sh          Installation, Update, Deinstallation
 ```
 

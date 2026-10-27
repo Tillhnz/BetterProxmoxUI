@@ -14,6 +14,7 @@ import { renderAdvice } from "./js/views/advice.js";
 import { renderStats } from "./js/views/stats.js";
 import { renderNode } from "./js/views/node.js";
 import { renderUsers } from "./js/views/users.js";
+import { tlsGuideSheet } from "./js/views/tls.js";
 
 const app = document.getElementById("app");
 let cleanup = [];          // Timer & Listener der aktuellen Seite
@@ -184,7 +185,9 @@ async function renderLogin() {
     field("Benutzername", user),
     field("Passwort", pass),
     field("Anmeldebereich", realmSel, "Meist „Linux PAM“ für den Benutzer root."),
-    err, btn);
+    err, btn,
+    h("button", { type: "button", class: "btn ghost sm", style: { alignSelf: "center", color: "var(--muted)" }, onclick: tlsGuideSheet },
+      icon("lock", "sm"), "Browser zeigt „Nicht sicher“?"));
 
   api("/realms").then(r => {
     realms = r.data || realms;
