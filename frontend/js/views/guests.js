@@ -2,9 +2,10 @@ import {
   h, icon, clear, pve, state, bytes, pct, uptime, meter, num, guestIcon, statusBadge, callout, loader, nodePath, enc,
   toast, errorToast, trackTask, confirmDialog, openSheet, field, input, select, toggle, withBusy, pageHead, empty, relTime,
   guestTypeLabel, dateTime, api, lockBadge, LOCK_TEXT, taskName, parseUpid,
-  backupDownloadBtn,
+  tabBar,
 } from "../core.js";
 import { statsSection, sizingSection, hardwareCard, optionsCard, actionsCard, historyCard } from "./guestExtra.js";
+import { guestBackupSection, jobsCovering, describeSchedule, loadBackupItems } from "./backups.js";
 
 // ---------------------------------------------------------------------------
 // Liste
@@ -23,6 +24,7 @@ export async function renderGuests({ page, el, go }) {
     chips, h("div", { style: { height: "12px" } }), listCard);
 
   let guests = [];
+  let jobs = null, jobsAt = 0;
   function drawChips() {
     clear(chips);
     const counts = { all: guests.length, running: guests.filter(g => g.status === "running").length,
@@ -45,13 +47,14 @@ export async function renderGuests({ page, el, go }) {
     }
     if (!list.length) { listCard.append(empty("search", "Nichts gefunden", "Versuche einen anderen Suchbegriff.")); return; }
     list.sort((a, b) => a.vmid - b.vmid);
-    listCard.append(h("div", { class: "list" }, list.map(g => guestRow(g, go))));
+    listCard.append(h("div", { class: "list" }, list.map(g => guestRow(g, go, jobs ? jobsCovering(jobs, g.vmid).length > 0 : null))));
   }
 
   async function load() {
     try {
       const res = await pve("GET", "/cluster/resources", { type: "vm" });
       guests = res.filter(r => r.node === state.node && !r.template);
+      if (Date.now() - jobsAt > 30000) { try { jobs = await pve("GET", "/cluster/backup"); jobsAt = Date.now(); } catch { jobs = null; } }
       drawChips(); draw();
     } catch (e) { clear(listCard).append(h("div", { style: { padding: "18px" } }, callout("bad", "Laden fehlgeschlagen", e.message))); }
   }
@@ -60,7 +63,7 @@ export async function renderGuests({ page, el, go }) {
   page.on("bpui:refresh", load);
 }
 
-function guestRow(g, go) {
+function guestRow(g, go, backedUp) {
   const running = g.status === "running";
   const powerBtn = h("button", { class: `btn sm ${running ? "" : "primary"}`, title: running ? "Herunterfahren" : "Starten",
     onclick: async (e) => {
@@ -73,7 +76,8 @@ function guestRow(g, go) {
   return h("div", { class: "list-item clickable", onclick: () => go(`guest/${g.type}/${g.vmid}`) },
     guestIcon(g.type, g.status, g.name),
     h("div", { class: "grow" },
-      h("div", { class: "row", style: { gap: "8px" } }, h("div", { class: "title" }, g.name || `#${g.vmid}`), h("span", { class: "badge" }, `#${g.vmid}`), lockBadge(g.lock)),
+      h("div", { class: "row", style: { gap: "8px" } }, h("div", { class: "title" }, g.name || `#${g.vmid}`), h("span", { class: "badge" }, `#${g.vmid}`), lockBadge(g.lock),
+        backedUp === false ? h("span", { class: "badge warn", title: "Wird nicht automatisch gesichert – in der Maschine unter „Sicherungen“ einrichten" }, icon("archive", "sm"), h("span", { class: "hide-sm" }, "Keine Sicherung")) : null),
       h("div", { class: "meta" }, running
         ? `${guestTypeLabel(g.type)} · CPU ${num((g.cpu || 0) * 100, 0)} % · RAM ${bytes(g.mem)} von ${bytes(g.maxmem)} · läuft seit ${uptime(g.uptime)}`
         : `${guestTypeLabel(g.type)} · ausgeschaltet`)),
@@ -95,14 +99,22 @@ export async function powerAction(type, vmid, action, name, btn) {
 // ---------------------------------------------------------------------------
 // Detailansicht
 // ---------------------------------------------------------------------------
-export async function renderGuestDetail({ page, el, go }, type, vmid) {
+const TABS = [
+  { value: "uebersicht", label: "Übersicht", icon: "home" },
+  { value: "sicherungen", label: "Sicherungen", icon: "archive" },
+  { value: "statistik", label: "Statistik", icon: "chart" },
+  { value: "einstellungen", label: "Einstellungen", icon: "settings" },
+  { value: "mehr", label: "Mehr", icon: "more" },
+];
+
+export async function renderGuestDetail({ page, el, go }, type, vmid, tabParam) {
   if (!["qemu", "lxc"].includes(type) || !/^\d+$/.test(vmid || "")) return go("guests");
   const base = nodePath(`/${type}/${vmid}`);
   el.append(h("a", { class: "back", href: "#/guests" }, icon("chevronLeft", "sm"), "Maschinen"));
   const hero = h("div", { class: "card" }, loader());
   const live = h("div", { class: "grid cols-4", style: { marginTop: "14px" } });
   const body = h("div");
-  el.append(hero, live, body);
+  el.append(hero, body);
 
   let config, status;
   try {
@@ -112,28 +124,38 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
     return;
   }
   const name = config.hostname || config.name || `#${vmid}`;
+  let currentIps = [];
+  let switchTabExt = () => {};
 
   function drawHero() {
     const running = status.status === "running";
-    const actions = h("div", { class: "action-bar" });
+    const actions = h("div", { class: "action-bar hero-actions" });
     if (!running) {
       actions.append(btnAction("play", "Starten", "primary", (b) => powerAction(type, vmid, "start", name, b)));
     } else {
       actions.append(
-        btnAction("power", "Herunterfahren", "", async (b) => {
+        btnAction("power", ["Herunterfahren", "Aus"], "", async (b) => {
           if (await confirmDialog({ title: "Herunterfahren?", text: `„${name}“ wird sauber beendet.`, confirmText: "Herunterfahren" })) powerAction(type, vmid, "shutdown", name, b);
         }),
-        btnAction("restart", "Neu starten", "", async (b) => {
+        btnAction("restart", ["Neu starten", "Neustart"], "", async (b) => {
           if (await confirmDialog({ title: "Neu starten?", text: `„${name}“ wird neu gestartet.`, confirmText: "Neu starten" })) powerAction(type, vmid, "reboot", name, b);
-        }),
-        btnAction("stop", "Hart ausschalten", "danger-ghost", async (b) => {
-          if (await confirmDialog({ title: "Hart ausschalten?", text: "Wie Stecker ziehen: Nicht gespeicherte Daten in der Maschine können verloren gehen. Nur nutzen, wenn sie nicht mehr reagiert.", confirmText: "Ausschalten", danger: true }))
-            powerAction(type, vmid, "stop", name, b);
         }),
       );
     }
     const consoleUrl = `https://${location.hostname}:8006/?console=${type === "qemu" ? "kvm" : "lxc"}&novnc=1&vmid=${vmid}&vmname=${enc(name)}&node=${enc(state.node)}&resize=off&cmd=`;
-    actions.append(h("a", { class: "btn", href: consoleUrl, target: "_blank", rel: "noopener" }, icon("terminal", "sm"), "Konsole"));
+    actions.append(h("a", { class: "btn", href: consoleUrl, target: "_blank", rel: "noopener", title: "Öffnet sich in der Proxmox-Oberfläche (eventuell dort einmal anmelden)" }, icon("terminal", "sm"), "Konsole"));
+    if (running) actions.append(h("button", { class: "btn icon", title: "Weitere Aktionen", "aria-label": "Weitere Aktionen", onclick: () => openSheet((sheet, close) => {
+      const item = (ico, label, sub, fn, danger) => h("div", { class: "list-item clickable", onclick: () => { close(); fn(); } },
+        h("div", { class: "guest-icon", style: danger ? { background: "var(--bad-soft)", color: "var(--bad)" } : null }, icon(ico)),
+        h("div", { class: "grow" }, h("div", { class: "title", style: danger ? { color: "var(--bad)" } : null }, label), h("div", { class: "meta", style: { whiteSpace: "normal" } }, sub)));
+      sheet.append(h("h2", null, name), h("div", { class: "card pad-0 flat", style: { marginTop: "12px" } }, h("div", { class: "list" },
+        item("archive", "Jetzt sichern", "Sofort eine Sicherung erstellen.", () => backupNowSheet([{ vmid: Number(vmid), name }])),
+        item("camera", "Snapshot erstellen", "Schneller Sicherungspunkt, z. B. vor einem Update.", () => switchTabExt("sicherungen")),
+        item("stop", "Hart ausschalten", "Wie Stecker ziehen – nur, wenn die Maschine nicht mehr reagiert.", async () => {
+          if (await confirmDialog({ title: "Hart ausschalten?", text: "Wie Stecker ziehen: Nicht gespeicherte Daten in der Maschine können verloren gehen. Nur nutzen, wenn sie nicht mehr reagiert.", confirmText: "Ausschalten", danger: true }))
+            powerAction(type, vmid, "stop", name);
+        }, true))));
+    }) }, icon("more")));
 
     clear(hero).append(
       h("div", { class: "detail-hero" }, guestIcon(type, status.status, name),
@@ -144,7 +166,6 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
         try { config = await pve("GET", `${base}/config`); status = await pve("GET", `${base}/status/current`); drawHero(); } catch { /* egal */ }
       })) : null,
       h("div", { style: { marginTop: "16px" } }, actions),
-      h("div", { class: "muted small", style: { marginTop: "10px" } }, "Die Konsole öffnet sich in der Proxmox-Oberfläche (eventuell dort einmal anmelden)."),
     );
     loadIp();
   }
@@ -164,7 +185,9 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
         }
       }
       const line = document.getElementById("ip-line");
+      currentIps = ips;
       if (line && ips.length) line.replaceChildren(" · IP ", h("strong", { class: "mono" }, ips.join(", ")));
+      window.dispatchEvent(new Event("bpui:ips"));
     } catch { /* Agent fehlt o. ä. */ }
   }
 
@@ -182,18 +205,43 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
 
   drawHero(); drawLive();
   const reload = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
-  body.append(
-    sizingSection({ type, vmid: Number(vmid), name, status: status.status, maxcpu: status.cpus }, config, reload),
-    statsSection(type, vmid),
-    settingsCard(type, vmid, base, config, name),
-    hardwareCard(type, vmid, base, config, name, reload),
-    optionsCard(type, base, config, reload),
-    snapshotsCard(type, base, name, page),
-    backupCard(type, vmid, name),
-    actionsCard(type, vmid, base, config, name, () => status, go),
-    historyCard(vmid),
-    dangerCard(type, vmid, base, name, () => status, go),
-  );
+  const guest = { type, vmid: Number(vmid), name, status: status.status, maxcpu: status.cpus };
+
+  // ---------- Reiter ----------
+  let tab = TABS.some(t => t.value === tabParam) ? tabParam : "uebersicht";
+  const panes = {};
+  const build = {
+    uebersicht: () => h("div", null, live, sizingSection(guest, config, reload), glanceCard(type, vmid, config, () => currentIps, (t) => switchTab(t))),
+    sicherungen: () => h("div", null, guestBackupSection(guest, { onScheduleChange: () => updateTabDots() }), snapshotsCard(type, base, name)),
+    statistik: () => statsSection(type, vmid),
+    einstellungen: () => h("div", null, settingsCard(type, vmid, base, config, name), hardwareCard(type, vmid, base, config, name, reload), optionsCard(type, base, config, reload)),
+    mehr: () => h("div", null, actionsCard(type, vmid, base, config, name, () => status, go), historyCard(vmid), dangerCard(type, vmid, base, name, () => status, go)),
+  };
+  const bar = tabBar(TABS, tab, (t) => switchTab(t, true));
+  body.append(bar);
+  const paneHost = h("div");
+  body.append(paneHost);
+  function switchTab(t, fromBar = false) {
+    tab = t;
+    if (!fromBar) bar.querySelectorAll(".tab").forEach((b, i) => b.classList.toggle("active", TABS[i].value === t));
+    panes[t] ||= build[t]();
+    clear(paneHost).append(panes[t]);
+    history.replaceState(null, "", `#/guest/${type}/${vmid}/${t}`);
+    const top = bar.getBoundingClientRect().top;
+    if (top < 0) window.scrollTo({ top: window.scrollY + top - 70 });
+  }
+  async function updateTabDots() {
+    try {
+      const jobs = await pve("GET", "/cluster/backup");
+      const b = bar.querySelectorAll(".tab")[1];
+      b.querySelector(".tab-dot")?.remove();
+      if (!jobsCovering(jobs, vmid).length) b.append(h("span", { class: "tab-dot", title: "Wird nicht automatisch gesichert" }));
+    } catch { /* egal */ }
+  }
+  live.style.marginTop = "0";
+  switchTabExt = (t) => switchTab(t);
+  switchTab(tab);
+  updateTabDots();
 
   page.every(4000, async () => {
     try {
@@ -207,8 +255,68 @@ export async function renderGuestDetail({ page, el, go }, type, vmid) {
   page.on("bpui:refresh", async () => { try { status = await pve("GET", `${base}/status/current`); drawHero(); drawLive(); } catch { /* egal */ } });
 }
 
+// ---------- Auf einen Blick ----------
+function glanceCard(type, vmid, config, getIps, switchTab) {
+  const list = h("div", { class: "list" });
+  const row = (ico, label, value, onClick, cta) => {
+    const el = h("div", { class: `list-item ${onClick ? "clickable" : ""}`, onclick: onClick || null },
+      h("div", { class: "guest-icon", style: { width: "38px", height: "38px" } }, icon(ico, "sm")),
+      h("div", { class: "grow" }, h("div", { class: "label" }, label), h("div", { class: "val", style: { whiteSpace: "normal" } }, value)),
+      cta || (onClick ? icon("chevronRight", "sm") : null));
+    list.append(el);
+    return el;
+  };
+
+  // Sicherung
+  const backupRow = row("archive", "Sicherung", h("span", { class: "muted" }, "Prüfe …"), () => switchTab("sicherungen"));
+  (async () => {
+    try {
+      const [jobs, stores] = await Promise.all([pve("GET", "/cluster/backup"), pve("GET", nodePath("/storage"), { content: "backup", enabled: 1 })]);
+      const cov = jobsCovering(jobs, vmid);
+      const items = await loadBackupItems(stores, vmid);
+      const last = items[0];
+      const val = backupRow.querySelector(".val");
+      const old = last && Date.now() / 1000 - last.ctime > 8 * 86400;
+      clear(val).append(
+        cov.length ? describeSchedule(cov[0].schedule || "") : h("span", { style: { color: "var(--warn)" } }, "Nicht automatisch gesichert"),
+        h("div", { class: "muted small", style: { fontWeight: 500 } }, last ? `Letzte Sicherung ${relTime(last.ctime)}${old ? " – veraltet" : ""}` : "Noch keine Sicherung vorhanden"));
+      if (!cov.length) backupRow.lastChild.replaceWith(h("span", { class: "btn sm primary" }, "Einrichten"));
+    } catch { clear(backupRow.querySelector(".val")).append("–"); }
+  })();
+
+  // Netzwerk
+  const net = Object.entries(config).filter(([k]) => /^net\d+$/.test(k)).map(([, v]) => String(v));
+  const netDesc = net.map(v => {
+    const bridge = (v.match(/bridge=([^,]+)/) || [])[1];
+    const ip = (v.match(/(?:^|,)ip=([^,]+)/) || [])[1];
+    const tag = (v.match(/tag=(\d+)/) || [])[1];
+    return [bridge, ip ? (ip === "dhcp" ? "IP automatisch" : `feste IP ${ip}`) : null, tag ? `VLAN ${tag}` : null].filter(Boolean).join(" · ");
+  }).join(" | ");
+  const netRow = row("network", "Netzwerk", netDesc || "Keine Netzwerkkarte", () => switchTab("einstellungen"));
+  const showIps = () => { const ips = getIps(); if (ips.length) clear(netRow.querySelector(".val")).append(h("span", { class: "mono" }, ips.join(", ")), h("div", { class: "muted small", style: { fontWeight: 500 } }, netDesc)); };
+  showIps();
+  window.addEventListener("bpui:ips", showIps);
+
+  // NAS-Ordner
+  const folders = Object.entries(config).filter(([k, v]) => (/^mp\d+$/.test(k) && String(v).startsWith("/")) || /^virtiofs\d+$/.test(k))
+    .map(([k, v]) => k.startsWith("virtiofs") ? `virtiofs „${(String(v).match(/dirid=([^,]+)/) || [])[1] || String(v).split(",")[0]}“` : (String(v).match(/mp=([^,]+)/) || [])[1]);
+  row("folder", "NAS-Ordner", folders.length ? folders.join(", ") : h("span", { class: "muted" }, "Keine verbunden"), () => { location.hash = "#/storage"; },
+    folders.length ? null : h("span", { class: "btn sm" }, "Ordner teilen"));
+
+  // Autostart
+  const onboot = config.onboot === 1 || config.onboot === "1";
+  row("power", "Autostart", onboot ? "Startet automatisch mit dem Server" : h("span", { style: { color: "var(--warn)" } }, "Startet nach einem Neustart nicht von selbst"), () => switchTab("einstellungen"));
+
+  // Notizen
+  if (String(config.description || "").trim()) row("edit", "Notizen", String(config.description).trim().slice(0, 300), () => switchTab("einstellungen"));
+
+  return h("div", { class: "card pad-0 glance", style: { marginTop: "14px" } },
+    h("div", { class: "card-head", style: { padding: "16px 18px 4px", margin: 0 } }, icon("info"), h("h3", null, "Auf einen Blick")), list);
+}
+
 function btnAction(ico, label, cls, fn) {
-  const b = h("button", { class: `btn ${cls}` }, icon(ico, "sm"), label);
+  const text = Array.isArray(label) ? [h("span", { class: "hide-sm" }, label[0]), h("span", { class: "show-sm" }, label[1])] : label;
+  const b = h("button", { class: `btn ${cls}` }, icon(ico, "sm"), text);
   b.addEventListener("click", () => fn(b));
   return b;
 }
@@ -340,28 +448,6 @@ function snapshotsCard(type, base, name) {
 }
 
 // ---------- Sicherung ----------
-function backupCard(type, vmid, name) {
-  const card = h("div", { class: "card", style: { marginTop: "14px" } });
-  const listEl = h("div", { class: "muted small" }, "Lade …");
-  card.append(h("div", { class: "card-head" }, icon("archive"), h("h3", null, "Sicherungen"), h("span", { class: "spacer" }),
-    h("button", { class: "btn sm primary", onclick: () => backupNowSheet([{ vmid, name }]) }, "Jetzt sichern")), listEl);
-  (async () => {
-    try {
-      const stores = await pve("GET", nodePath("/storage"), { content: "backup", enabled: 1 });
-      let all = [];
-      for (const s of stores) {
-        try { all = all.concat((await pve("GET", nodePath(`/storage/${enc(s.storage)}/content`), { content: "backup", vmid })).map(b => ({ ...b, storeType: s.type }))); } catch { /* egal */ }
-      }
-      all.sort((a, b) => (b.ctime || 0) - (a.ctime || 0));
-      clear(listEl).append(all.length
-        ? h("div", null, h("div", null, `${all.length} Sicherung${all.length === 1 ? "" : "en"} vorhanden · letzte ${relTime(all[0].ctime)} (${bytes(all[0].size)}). `, h("a", { href: "#/backups" }, "Verwalten")),
-            h("div", { style: { marginTop: "10px" } }, backupDownloadBtn(all[0], all[0].storeType, { label: "Neueste herunterladen" })))
-        : "Für diese Maschine gibt es noch keine Sicherung.");
-    } catch (e) { clear(listEl).append(e.message); }
-  })();
-  return card;
-}
-
 export function backupNowSheet(guests, allGuests = false) {
   openSheet(async (sheet, close) => {
     const storeSel = select([{ value: "", label: "Lade …" }], "");

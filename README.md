@@ -14,7 +14,7 @@ Eine schöne, einfache Oberfläche für **Proxmox VE** – für alle, die ihren 
 - **Statistik** – Diagramme für Server (CPU, RAM, Netzwerk, Last, Festplatte), Speicher und jede Maschine über Stunde/Tag/Woche/Monat/Jahr, Rangliste der größten Verbraucher
 - **Server** – Systeminfos, Dienste (neu starten), Systemprotokoll mit Filter, Festplatten mit SMART-Werten, ZFS-Pools, Netzwerk-Übersicht, Host-Konsole
 - **Benutzer** – Benutzer anlegen, verständliche Rollen (Administrator, Maschinen verwalten/bedienen, Nur ansehen), Passwort ändern, deaktivieren, Zwei-Faktor-Status
-- **Maschinen-Details** – Verlaufsdiagramme, Hardware (CD/ISO wechseln, Festplatte und Netzwerkkarte hinzufügen), Start-Reihenfolge, Schlagwörter, Löschschutz, Klonen, Vorlage, Verschieben im Cluster, Aufgaben-Verlauf
+- **Maschinen-Details** – übersichtlich in Reitern (Übersicht, Sicherungen, Statistik, Einstellungen, Mehr) mit „Auf einen Blick“ (Sicherung, Netzwerk, NAS-Ordner, Autostart); im Reiter **Sicherungen** pro Dienst regelmäßige Sicherung einrichten (täglich, werktags, wöchentlich oder mehrmals täglich), aus gemeinsamen Zeitplänen herausnehmen und nur die eigenen Sicherungen sehen; dazu Verlaufsdiagramme, Hardware (CD/ISO wechseln, Festplatte und Netzwerkkarte hinzufügen), Start-Reihenfolge, Schlagwörter, Löschschutz, Klonen, Vorlage, Verschieben im Cluster, Aufgaben-Verlauf
 - **Sicherungen** – jetzt sichern, automatische Zeitpläne, Wiederherstellen (als neue Maschine oder Original ersetzen), Sicherungsdateien herunterladen (nur root@pam, nicht bei Proxmox Backup Server)
 - **Updates** – Proxmox-Updates prüfen und installieren, alle Container aktualisieren, Oberfläche selbst aktualisieren
 - **Nur im Heimnetz erreichbar**, optimiert für Handy und Desktop, hell und dunkel

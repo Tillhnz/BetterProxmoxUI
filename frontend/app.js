@@ -49,7 +49,7 @@ function route() {
   if (!state.user) return renderLogin();
   if (!mainEl) renderShell();
   const parts = (location.hash.replace(/^#\/?/, "") || "dashboard").split("/").map(decodeURIComponent);
-  const [view, a, b] = parts;
+  const [view, a, b, c] = parts;
   document.querySelectorAll("[data-nav]").forEach(el => {
     const p = el.dataset.nav;
     el.classList.toggle("active", p === view || (p === "guests" && view === "guest") || (p === "apps" && view === "job") ||
@@ -61,11 +61,11 @@ function route() {
   const views = {
     dashboard: () => renderDashboard(ctx),
     guests: () => renderGuests(ctx),
-    guest: () => renderGuestDetail(ctx, a, b),
+    guest: () => renderGuestDetail(ctx, a, b, c),
     new: () => (a === "lxc" ? renderNewLxc(ctx) : a === "vm" ? renderNewVm(ctx) : renderNew(ctx)),
     apps: () => renderApps(ctx),
     job: () => renderJob(ctx, a),
-    backups: () => renderBackups(ctx),
+    backups: () => renderBackups(ctx, a),
     updates: () => renderUpdates(ctx),
     tasks: () => renderTasks(ctx),
     storage: () => renderStorage(ctx),

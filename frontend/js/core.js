@@ -139,6 +139,8 @@ export async function api(path, { method = "GET", body, query } = {}) {
     }
     throw new ApiError(res.status, msg, data.errors);
   }
+  // Nach jeder Änderung sind zwischengespeicherte Prüfungen (Empfehlungen) veraltet
+  if (method !== "GET") window.dispatchEvent(new Event("bpui:stale"));
   return data;
 }
 
@@ -609,4 +611,21 @@ export function backupDownloadBtn(b, storeType, { label = null } = {}) {
     title: `Herunterladen (${bytes(b.size)})` }, icon("download", "sm"), label ? h("span", null, label) : h("span", { class: "hide-sm" }, "Herunterladen"));
   a.addEventListener("click", () => toast("Download startet", `${bytes(b.size)} – das kann je nach Größe etwas dauern.`, "info"));
   return a;
+}
+
+// ---------- Reiter ----------
+export function tabBar(items, active, onChange) {
+  const bar = h("div", { class: "tabbar", role: "tablist" });
+  for (const it of items) {
+    const b = h("button", { type: "button", role: "tab", class: `tab ${it.value === active ? "active" : ""}`, "aria-selected": it.value === active ? "true" : "false" },
+      it.icon ? icon(it.icon, "sm") : null, it.label, it.dot ? h("span", { class: `tab-dot ${it.dot}` }) : null);
+    b.addEventListener("click", () => {
+      bar.querySelectorAll(".tab").forEach(x => { x.classList.remove("active"); x.setAttribute("aria-selected", "false"); });
+      b.classList.add("active"); b.setAttribute("aria-selected", "true");
+      b.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+      onChange(it.value);
+    });
+    bar.append(b);
+  }
+  return bar;
 }

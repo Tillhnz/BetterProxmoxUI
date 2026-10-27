@@ -26,6 +26,7 @@ const settle = (p) => p.then(v => v, () => null);
 // Alle Prüfungen
 // ---------------------------------------------------------------------------
 let cache = null;
+window.addEventListener("bpui:stale", () => { cache = null; });
 export async function runChecks({ force = false } = {}) {
   if (!force && cache && Date.now() - cache.time < 60000) return cache.items;
   const admin = state.user.host_admin;
