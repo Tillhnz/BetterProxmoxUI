@@ -97,7 +97,12 @@ ok "Version $(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo '?')"
 
 # ---------------------------------------------------------------------------
 step "Python-Umgebung einrichten …"
-if [[ ! -x "$INSTALL_DIR/.venv/bin/python" ]]; then
+# Neu aufbauen, wenn sie fehlt oder nach einem großen Upgrade (neue Python-Version) nicht mehr passt
+SYS_PY="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+VENV_PY="$("$INSTALL_DIR/.venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+if [[ "$VENV_PY" != "$SYS_PY" ]]; then
+  [[ -n "$VENV_PY" ]] && echo "  Python wurde von $VENV_PY auf $SYS_PY aktualisiert – baue die Umgebung neu auf."
+  rm -rf "$INSTALL_DIR/.venv"
   python3 -m venv "$INSTALL_DIR/.venv"
 fi
 "$INSTALL_DIR/.venv/bin/pip" install -q --upgrade pip >/dev/null

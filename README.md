@@ -17,6 +17,7 @@ Eine schöne, einfache Oberfläche für **Proxmox VE** – für alle, die ihren 
 - **Maschinen-Details** – übersichtlich in Reitern (Übersicht, Sicherungen, Statistik, Einstellungen, Mehr) mit „Auf einen Blick“ (Sicherung, Netzwerk, NAS-Ordner, Autostart); im Reiter **Sicherungen** pro Dienst regelmäßige Sicherung einrichten (täglich, werktags, wöchentlich oder mehrmals täglich), aus gemeinsamen Zeitplänen herausnehmen und nur die eigenen Sicherungen sehen; dazu Verlaufsdiagramme, Hardware (CD/ISO wechseln, Festplatte und Netzwerkkarte hinzufügen), Start-Reihenfolge, Schlagwörter, Löschschutz, Klonen, Vorlage, Verschieben im Cluster, Aufgaben-Verlauf
 - **Sicherungen** – jetzt sichern, automatische Zeitpläne, Wiederherstellen (als neue Maschine oder Original ersetzen), Sicherungsdateien herunterladen (nur root@pam, nicht bei Proxmox Backup Server)
 - **Updates** – Proxmox-Updates prüfen und installieren, alle Container aktualisieren, Oberfläche selbst aktualisieren
+- **Großes Upgrade (Proxmox 8 → 9)** – Assistent mit Voraussetzungen (Version, Speicherplatz, Einzelserver, kein Ceph, frische Sicherungen, Notfall-Zugang), offizieller Prüfung `pve8to9` mit verständlichen Hinweisen, Umstellen der Paketquellen auf Debian 13 / Proxmox 9 (fremde Quellen werden abgeschaltet, alles rückgängig machbar) und einem Upgrade, das als eigenständiger Systemdienst läuft – unabhängig von Browser und Oberfläche. Danach passt sich die Oberfläche selbst an (neue Python-Version) und bietet den Neustart an. Cluster und Ceph werden bewusst nicht automatisch aktualisiert.
 - **Nur im Heimnetz erreichbar**, optimiert für Handy und Desktop, hell und dunkel
 
 ## Installation
@@ -88,6 +89,7 @@ backend/app.py      Starlette-Server: Login, API-Weiterleitung, Skript-Katalog, 
 frontend/           Oberfläche (reines JavaScript, kein Build-Schritt nötig)
 bin/start.sh        Startet den Server (HTTPS, Weiterleitung von http://)
 bin/cert.sh         Erstellt und erneuert das Heimnetz-Zertifikat
+bin/major-upgrade.sh  Führt das große Proxmox-Upgrade aus (läuft über systemd-run)
 install.sh          Installation, Update, Deinstallation
 ```
 

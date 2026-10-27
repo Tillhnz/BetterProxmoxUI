@@ -14,6 +14,7 @@ import { renderAdvice } from "./js/views/advice.js";
 import { renderStats } from "./js/views/stats.js";
 import { renderNode } from "./js/views/node.js";
 import { renderUsers } from "./js/views/users.js";
+import { renderUpgrade } from "./js/views/upgrade.js";
 import { tlsGuideSheet } from "./js/views/tls.js";
 
 const app = document.getElementById("app");
@@ -52,7 +53,7 @@ function route() {
   const [view, a, b, c] = parts;
   document.querySelectorAll("[data-nav]").forEach(el => {
     const p = el.dataset.nav;
-    el.classList.toggle("active", p === view || (p === "guests" && view === "guest") || (p === "apps" && view === "job") ||
+    el.classList.toggle("active", p === view || (p === "guests" && view === "guest") || (p === "apps" && view === "job") || (p === "updates" && view === "upgrade") ||
       (p === "new" && view === "new"));
   });
   clear(mainEl);
@@ -73,6 +74,7 @@ function route() {
     stats: () => renderStats(ctx),
     node: () => renderNode(ctx),
     users: () => renderUsers(ctx),
+    upgrade: () => renderUpgrade(ctx),
   };
   (views[view] || views.dashboard)();
 }

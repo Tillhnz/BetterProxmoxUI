@@ -8,6 +8,7 @@ import {
 import { unlockFlow } from "./guests.js";
 import { analyzeAll, applySizing } from "../sizing.js";
 import { tlsGuideSheet } from "./tls.js";
+import { upgradeAvailable } from "./upgrade.js";
 
 const LEVELS = {
   bad: { label: "Dringend", order: 0, cls: "bad", ico: "alert" },
@@ -288,6 +289,12 @@ export async function runChecks({ force = false } = {}) {
   else if (tls?.mode === "pve") add({ id: "tls-pve", level: "warn", cat: "sicherheit", title: "Kein eigenes HTTPS-Zertifikat",
     why: "Ein Heimnetz-Zertifikat konnte nicht erstellt werden. Die Verbindung ist verschlüsselt, aber der Browser warnt dauerhaft.",
     todo: "Prüfe unter „Server“ den Abschnitt „Sichere Verbindung“ oder richte in Proxmox ein Zertifikat (z. B. Let's Encrypt) ein.", actions: [{ label: "Zum Server", href: "#/node" }] });
+
+  const major = await upgradeAvailable().catch(() => null);
+  if (major) add({ id: `major-${major.path.to}`, level: "info", cat: "system", title: `Proxmox VE ${major.path.to} ist verfügbar`,
+    why: `Du nutzt ${major.version}. Proxmox ${major.path.from} bekommt noch eine Weile Sicherheitsupdates, aber nicht unbegrenzt.`,
+    todo: "Wenn du Zeit hast (30–60 Minuten), mit dem Upgrade-Assistenten in Ruhe umsteigen – er prüft vorher alles.",
+    actions: [{ label: "Upgrade-Assistent", href: "#/upgrade" }] });
 
   add({ id: "tip-passwords", level: "info", cat: "sicherheit", title: "Starke, einzigartige Passwörter",
     why: "Proxmox, NAS und Apps sollten jeweils ein eigenes Passwort haben – wird eins bekannt, bleiben die anderen sicher.",

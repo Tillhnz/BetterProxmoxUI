@@ -1,3 +1,4 @@
+import { upgradeCard } from "./upgrade.js";
 import {
   h, icon, clear, api, pve, state, nodePath, toast, errorToast, trackTask, confirmDialog, withBusy, pageHead, callout, loader,
   setUpdatesCount, uptime,
@@ -9,7 +10,7 @@ export async function renderUpdates({ el, go }) {
   const selfCard = h("div", { class: "card", style: { marginTop: "14px" } });
   const ctCard = h("div", { class: "card", style: { marginTop: "14px" } });
   const powerCard = h("div", { class: "card", style: { marginTop: "14px" } });
-  el.append(pveCard, ctCard, selfCard, powerCard);
+  el.append(upgradeCard(go), pveCard, ctCard, selfCard, powerCard);
   const admin = state.user.host_admin;
 
   async function drawPve(refreshing = false) {

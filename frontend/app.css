@@ -554,3 +554,19 @@ h2.section.hide-sm-block { display: flex; }
   .list-item.wrap-sm > .grow { flex-basis: calc(100% - 60px); }
   .list-item.wrap-sm > .end { width: 100%; justify-content: flex-end; }
 }
+
+/* ---------- Großes Upgrade ---------- */
+.upgrade-step.locked { opacity: .55; }
+.step-num { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 700; font-size: 14px;
+  background: var(--surface-3); color: var(--text-2); }
+.step-num.accent { background: var(--accent); color: var(--accent-ink); }
+.step-num.ok { background: var(--ok); color: #fff; }
+.plain-list { margin: 0 0 12px; padding-left: 20px; color: var(--text-2); }
+.plain-list li { margin: 4px 0; }
+.upgrade-phases { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.phase { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 99px; background: var(--surface-2); color: var(--muted); font-weight: 600; font-size: 13.5px; }
+.phase .dot { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-3); font-size: 12px; }
+.phase.done { color: var(--ok); } .phase.done .dot { background: var(--ok); color: #fff; }
+.phase.now { color: var(--accent); background: var(--accent-soft); } .phase.now .dot { background: var(--accent); color: var(--accent-ink); }
+.phase.bad { color: var(--bad); background: var(--bad-soft); } .phase.bad .dot { background: var(--bad); color: #fff; }
+.upgrade-teaser { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); background: linear-gradient(135deg, var(--accent-soft), var(--surface) 60%); }

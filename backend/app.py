@@ -22,6 +22,7 @@ import os
 import pty
 import re
 import secrets
+import shutil
 import signal
 import ssl
 import struct
@@ -1239,6 +1240,371 @@ async def tls_proxmox(request: Request):
 
 
 # --------------------------------------------------------------------------
+# Großes Upgrade (z. B. Proxmox VE 8 → 9)
+# --------------------------------------------------------------------------
+
+UPGRADE_PATHS = {
+    "bookworm": {"from": 8, "to": 9, "next": "trixie", "checker": "pve8to9", "min": "8.4.1", "ceph": "ceph-squid",
+                 "guide": "https://pve.proxmox.com/wiki/Upgrade_from_8_to_9"},
+}
+NEWER = {"trixie": 9}
+APT_ROOT = Path(os.environ.get("BPUI_APT_ROOT", "/etc/apt"))
+OS_RELEASE = Path(os.environ.get("BPUI_OS_RELEASE", "/etc/os-release"))
+PVE_ETC = Path(os.environ.get("BPUI_PVE_ETC", "/etc/pve"))
+UP_STATUS = STATE_DIR / "major-upgrade.json"
+UP_LOG = STATE_DIR / "major-upgrade.log"
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+MARK = "# [Proxmox Zentrale, Upgrade] "
+
+
+def _codename() -> str:
+    try:
+        for line in OS_RELEASE.read_text().splitlines():
+            if line.startswith("VERSION_CODENAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+def _ver_tuple(v: str):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+
+def _repo_kind(uri: str) -> str:
+    host = (urllib.parse.urlparse(uri).hostname or "").lower()
+    if host == "debian.org" or host.endswith(".debian.org"):
+        return "debian"
+    if host.endswith("proxmox.com"):
+        return "ceph" if "/ceph" in uri else "proxmox"
+    return "other"
+
+
+def _apt_files():
+    files = []
+    if (APT_ROOT / "sources.list").exists():
+        files.append(APT_ROOT / "sources.list")
+    d = APT_ROOT / "sources.list.d"
+    if d.is_dir():
+        files += sorted(p for p in d.iterdir() if p.suffix in (".list", ".sources") and p.is_file())
+    return files
+
+
+def _deb822_stanzas(text: str):
+    return [blk for blk in re.split(r"\n\s*\n", text.strip()) if blk.strip()]
+
+
+def _deb822_fields(blk: str) -> dict:
+    out, key = {}, None
+    for line in blk.splitlines():
+        if line.startswith("#"):
+            continue
+        if line[:1] in (" ", "\t") and key:
+            out[key] += "\n" + line
+        elif ":" in line:
+            key, val = line.split(":", 1)
+            key = key.strip().lower()
+            out[key] = val.strip()
+    return out
+
+
+def _repo_entries() -> list[dict]:
+    """Alle aktiven Paketquellen, grob eingeordnet."""
+    out = []
+    for f in _apt_files():
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        if f.suffix == ".sources":
+            for blk in _deb822_stanzas(text):
+                fl = _deb822_fields(blk)
+                if fl.get("enabled", "yes").lower() == "no" or not fl.get("uris"):
+                    continue
+                for uri in fl["uris"].split():
+                    out.append({"file": f.name, "uri": uri, "suites": fl.get("suites", "").split(), "kind": _repo_kind(uri)})
+        else:
+            for line in text.splitlines():
+                t = line.strip()
+                if not t.startswith("deb"):
+                    continue
+                parts = re.sub(r"\[[^\]]*\]", "", t).split()
+                if len(parts) >= 3:
+                    out.append({"file": f.name, "uri": parts[1], "suites": [parts[2]], "kind": _repo_kind(parts[1])})
+    return out
+
+
+def _upgrade_state() -> dict:
+    try:
+        st = json.loads(UP_STATUS.read_text())
+    except (OSError, ValueError):
+        st = {"state": "none"}
+    st["log_size"] = UP_LOG.stat().st_size if UP_LOG.exists() else 0
+    return st
+
+
+async def _run(cmd: list[str], timeout: int = 600) -> tuple[int, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                                                    env={**os.environ, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "dumb"})
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        return proc.returncode, ANSI.sub("", out.decode(errors="replace"))
+    except FileNotFoundError:
+        return 127, f"{cmd[0]} nicht gefunden"
+    except asyncio.TimeoutError:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        return 124, "Zeitüberschreitung"
+
+
+async def upgrade_info(request: Request):
+    s, err = await _admin_only(request)
+    if err:
+        return err
+    code = _codename()
+    path = UPGRADE_PATHS.get(code)
+    rc, out = await _run(["pveversion"], 30)
+    m = re.search(r"pve-manager/([0-9.]+)", out)
+    ver = m.group(1) if m else ""
+    root = os.statvfs("/")
+    repos = _repo_entries()
+    sysctl_custom = False
+    with contextlib.suppress(OSError):
+        sysctl_custom = any(l.strip() and not l.strip().startswith("#") for l in Path("/etc/sysctl.conf").read_text().splitlines())
+    data = {
+        "codename": code, "version": ver, "major": int(ver.split(".")[0]) if ver[:1].isdigit() else None,
+        "path": path, "latest_major": code in NEWER,
+        "version_ok": bool(path and ver and _ver_tuple(ver) >= _ver_tuple(path["min"])),
+        "root_free": root.f_bavail * root.f_frsize,
+        "cluster": (PVE_ETC / "corosync.conf").exists(), "ceph": (PVE_ETC / "ceph.conf").exists(),
+        "checker": bool(path and shutil.which(path["checker"])),
+        "sysctl_custom": sysctl_custom,
+        "repos": repos,
+        "repos_switched": bool(path) and any(r["kind"] == "debian" and any(path["next"] in x for x in r["suites"]) for r in repos),
+        "backup_available": (STATE_DIR / "apt-backup.tar.gz").exists(),
+        "state": _upgrade_state(),
+    }
+    return JSONResponse({"data": data})
+
+
+async def _admin_only(request: Request):
+    s = await get_session(request)
+    if not s:
+        return None, _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return None, _err(403, "Das große Upgrade darf nur root@pam starten.")
+    return s, None
+
+
+def _parse_checker(text: str) -> dict:
+    items, section = [], ""
+    summary = {}
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        m = re.match(r"^=+\s*(.+?)\s*=+$", line.strip())
+        if m:
+            section = m.group(1).title()
+            continue
+        m = re.match(r"^(PASS|WARN|FAIL|SKIP|INFO|NOTICE):\s*(.*)$", line.strip())
+        if m:
+            items.append({"level": m.group(1).lower(), "text": m.group(2), "section": section})
+            continue
+        m = re.match(r"^(TOTAL|PASSED|SKIPPED|WARNINGS|FAILURES):\s*(\d+)", line.strip())
+        if m:
+            summary[m.group(1).lower()] = int(m.group(2))
+            continue
+        if line.startswith((" ", "\t")) and items and line.strip():
+            items[-1]["text"] += " " + line.strip()
+    return {"summary": summary, "items": items}
+
+
+async def upgrade_check(request: Request):
+    s, err = await _admin_only(request)
+    if err:
+        return err
+    path = UPGRADE_PATHS.get(_codename())
+    checker = (path or {}).get("checker") or "pve8to9"
+    if not shutil.which(checker):
+        return _err(400, f"Das Prüfprogramm „{checker}“ fehlt. Bitte zuerst auf die neueste Version aktualisieren.")
+    rc, out = await _run([checker, "--full"], 600)
+    res = _parse_checker(out)
+    res["raw"] = out[-20000:]
+    with contextlib.suppress(OSError):
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        (STATE_DIR / "major-upgrade-check.txt").write_text(out)
+    return JSONResponse({"data": res})
+
+
+def _switch_repos_sync(enterprise: bool) -> dict:
+    path = UPGRADE_PATHS.get(_codename())
+    if not path:
+        raise ValueError("Für dieses System ist kein großes Upgrade vorgesehen.")
+    old, new = _codename(), path["next"]
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    backup = STATE_DIR / "apt-backup.tar.gz"
+    if not backup.exists():   # erste Umstellung: Originalzustand sichern
+        import tarfile
+        with tarfile.open(backup, "w:gz") as tar:
+            for f in _apt_files():
+                tar.add(str(f), arcname=str(f.relative_to(APT_ROOT)))
+    changes, disabled, had_ceph = [], [], False
+    swap = lambda suite: re.sub(rf"^{old}(?=$|-)", new, suite)  # noqa: E731
+    for f in _apt_files():
+        text = f.read_text()
+        if f.suffix == ".sources":
+            blocks, changed = [], False
+            for blk in _deb822_stanzas(text):
+                fl = _deb822_fields(blk)
+                kind = _repo_kind((fl.get("uris") or "").split()[0] if fl.get("uris") else "")
+                active = fl.get("enabled", "yes").lower() != "no"
+                suites = fl.get("suites", "")
+                if active and kind == "debian" and old in suites:
+                    blk = re.sub(r"(?mi)^(Suites:\s*)(.*)$", lambda m: m.group(1) + " ".join(swap(x) for x in m.group(2).split()), blk)
+                    changed = True
+                elif active and kind in ("proxmox", "ceph") and f.name not in ("proxmox.sources", "ceph.sources"):
+                    had_ceph |= kind == "ceph"
+                    blk = blk.rstrip() + "\nEnabled: no"
+                    changed = True
+                elif active and kind == "other" and old in suites:
+                    blk = blk.rstrip() + "\nEnabled: no"
+                    changed = True
+                    disabled.append(f.name)
+                blocks.append(blk)
+            if changed:
+                f.write_text("\n\n".join(blocks) + "\n")
+                changes.append(f.name)
+        else:
+            lines, changed = [], False
+            for line in text.splitlines():
+                t = line.strip()
+                if t.startswith("deb"):
+                    parts = re.sub(r"\[[^\]]*\]", "", t).split()
+                    kind = _repo_kind(parts[1]) if len(parts) > 2 else "other"
+                    if kind == "debian" and len(parts) > 2 and parts[2].startswith(old):
+                        line = line.replace(f" {parts[2]} ", f" {swap(parts[2])} ", 1)
+                        changed = True
+                    elif kind in ("proxmox", "ceph"):
+                        had_ceph |= kind == "ceph"
+                        line = MARK + line
+                        changed = True
+                    elif kind == "other" and len(parts) > 2 and old in parts[2]:
+                        line = MARK + line
+                        changed = True
+                        disabled.append(f.name)
+                lines.append(line)
+            if changed:
+                f.write_text("\n".join(lines) + "\n")
+                changes.append(f.name)
+    keyring = Path("/usr/share/keyrings/proxmox-archive-keyring.gpg")
+    signed = f"Signed-By: {keyring}\n" if keyring.exists() else ""
+    d = APT_ROOT / "sources.list.d"
+    d.mkdir(parents=True, exist_ok=True)
+    pve_uri = "https://enterprise.proxmox.com/debian/pve" if enterprise else "http://download.proxmox.com/debian/pve"
+    (d / "proxmox.sources").write_text(f"Types: deb\nURIs: {pve_uri}\nSuites: {new}\nComponents: {'pve-enterprise' if enterprise else 'pve-no-subscription'}\n{signed}")
+    changes.append("proxmox.sources (neu)")
+    if had_ceph:
+        ceph_uri = f"https://enterprise.proxmox.com/debian/{path['ceph']}" if enterprise else f"http://download.proxmox.com/debian/{path['ceph']}"
+        (d / "ceph.sources").write_text(f"Types: deb\nURIs: {ceph_uri}\nSuites: {new}\nComponents: {'enterprise' if enterprise else 'no-subscription'}\n{signed}")
+        changes.append("ceph.sources (neu)")
+    return {"changes": changes, "disabled": sorted(set(disabled))}
+
+
+def _undo_repos_sync():
+    import tarfile
+    backup = STATE_DIR / "apt-backup.tar.gz"
+    if not backup.exists():
+        raise ValueError("Keine Sicherung der Paketquellen vorhanden.")
+    with tarfile.open(backup) as tar:
+        names = set(tar.getnames())
+        for f in _apt_files():
+            if str(f.relative_to(APT_ROOT)) not in names:
+                f.unlink()
+        for m in tar.getmembers():
+            if not m.isfile() or m.name.startswith("/") or ".." in m.name:
+                continue
+            (APT_ROOT / m.name).parent.mkdir(parents=True, exist_ok=True)
+            (APT_ROOT / m.name).write_bytes(tar.extractfile(m).read())
+    backup.unlink()
+
+
+async def upgrade_repos(request: Request):
+    s, err = await _admin_only(request)
+    if err:
+        return err
+    if _upgrade_state().get("state") == "running":
+        return _err(409, "Das Upgrade läuft bereits.")
+    body = await request.json() if request.method == "POST" else {}
+    try:
+        if request.method == "DELETE":
+            await asyncio.to_thread(_undo_repos_sync)
+            res = {"changes": ["Originale Paketquellen wiederhergestellt"], "disabled": []}
+        else:
+            res = await asyncio.to_thread(_switch_repos_sync, bool(body.get("enterprise")))
+    except (ValueError, OSError) as e:
+        return _err(400, str(e))
+    rc, out = await _run(["apt-get", "update"], 600)
+    errors = [l for l in out.splitlines() if l.startswith(("Err:", "E:", "W: Failed"))]
+    return JSONResponse({"data": {**res, "apt_ok": rc == 0 and not any(l.startswith(("Err:", "E:")) for l in errors), "apt_errors": errors[:20], "apt_output": out[-6000:]}})
+
+
+async def upgrade_start(request: Request):
+    s, err = await _admin_only(request)
+    if err:
+        return err
+    path = UPGRADE_PATHS.get(_codename())
+    if not path:
+        return _err(400, "Für dieses System ist kein großes Upgrade vorgesehen.")
+    if _upgrade_state().get("state") == "running":
+        return _err(409, "Das Upgrade läuft bereits.")
+    if not any(r["kind"] == "debian" and any(path["next"] in x for x in r["suites"]) for r in _repo_entries()):
+        return _err(400, "Bitte zuerst die Paketquellen umstellen.")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    UP_LOG.write_text("")
+    UP_STATUS.write_text(json.dumps({"state": "running", "phase": "start", "started": int(time.time()), "checker": path["checker"]}))
+    unit = f"bpui-major-upgrade-{int(time.time())}"
+    rc, out = await _run(["systemd-run", f"--unit={unit}", "--collect", "--quiet",
+                          f"--setenv=BPUI_STATE_DIR={STATE_DIR}", f"--setenv=BPUI_INSTALL_DIR={INSTALL_DIR}",
+                          "bash", f"{INSTALL_DIR}/bin/major-upgrade.sh", "run", path["checker"]], 30)
+    if rc != 0:
+        UP_STATUS.write_text(json.dumps({"state": "failed", "phase": "start", "exit": rc}))
+        return _err(500, f"Upgrade konnte nicht gestartet werden: {out.strip()[:300]}")
+    return JSONResponse({"ok": True})
+
+
+async def upgrade_status(request: Request):
+    s, err = await _admin_only(request)
+    if err:
+        return err
+    try:
+        offset = max(0, int(request.query_params.get("offset", "0")))
+    except ValueError:
+        offset = 0
+    chunk = ""
+    if UP_LOG.exists():
+        with open(UP_LOG, "rb") as fh:
+            size = fh.seek(0, 2)
+            if offset > size:
+                offset = 0
+            fh.seek(offset)
+            data = fh.read(256 * 1024)
+            offset += len(data)
+            chunk = ANSI.sub("", data.decode(errors="replace"))
+    return JSONResponse({"data": {**_upgrade_state(), "log": chunk, "offset": offset}})
+
+
+async def upgrade_reset(request: Request):
+    """Setzt einen fehlgeschlagenen/abgeschlossenen Upgrade-Status zurück (nur Anzeige)."""
+    s, err = await _admin_only(request)
+    if err:
+        return err
+    if _upgrade_state().get("state") == "running":
+        return _err(409, "Das Upgrade läuft noch.")
+    with contextlib.suppress(FileNotFoundError):
+        UP_STATUS.unlink()
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------
 # Sicherungen herunterladen
 # --------------------------------------------------------------------------
 
@@ -1290,6 +1656,12 @@ routes = [
     Route("/api/health", health),
     Route("/api/tls", tls_info),
     Route("/api/backups/download", backup_download),
+    Route("/api/upgrade", upgrade_info),
+    Route("/api/upgrade/check", upgrade_check, methods=["POST"]),
+    Route("/api/upgrade/repos", upgrade_repos, methods=["POST", "DELETE"]),
+    Route("/api/upgrade/start", upgrade_start, methods=["POST"]),
+    Route("/api/upgrade/status", upgrade_status),
+    Route("/api/upgrade/reset", upgrade_reset, methods=["POST"]),
     Route("/api/tls/ca.crt", tls_ca_download),
     Route("/api/tls/proxmox", tls_proxmox, methods=["POST", "DELETE"]),
     Route("/api/realms", realms),
