@@ -829,6 +829,8 @@ class Job:
         self.exit_code: int | None = None
         self.buffer = bytearray()
         self.clients: set[asyncio.Queue] = set()
+        self.killing = False
+        self.idle_since = time.time()   # seit wann niemand mehr zuschaut
         self.loop = asyncio.get_running_loop()
 
         full_env = {"TERM": "xterm-256color", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
@@ -854,7 +856,7 @@ class Job:
     def info(self) -> dict:
         return {"id": self.id, "title": self.title, "kind": self.kind, "owner": self.owner,
                 "started": self.started, "ended": self.ended, "running": self.running,
-                "exit_code": self.exit_code}
+                "exit_code": self.exit_code, "killed": self.killing}
 
     def _broadcast(self, item):
         for q in list(self.clients):
@@ -895,7 +897,7 @@ class Job:
         msg = f"\r\n\x1b[1;{32 if code == 0 else 31}m── Beendet (Code {code}) ──\x1b[0m\r\n".encode()
         self.buffer.extend(msg)
         self._broadcast(msg)
-        self._broadcast({"type": "exit", "code": code})
+        self._broadcast({"type": "exit", "code": code, "killed": self.killing})
 
     def write(self, data: bytes):
         if self.running:
@@ -911,18 +913,49 @@ class Job:
             except OSError:
                 pass
 
-    def kill(self):
-        if self.running:
+    def _session_pids(self) -> list[int]:
+        """Alle Prozesse, die in diesem Terminal laufen (gleiche Sitzung) – auch Befehle in der Konsole."""
+        pids = []
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
             try:
-                os.killpg(os.getpgid(self.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+                with open(f"/proc/{d}/stat") as fh:
+                    stat = fh.read()
+                fields = stat[stat.rindex(")") + 2:].split()
+                if int(fields[3]) == self.pid:   # Feld „session“
+                    pids.append(int(d))
+            except (OSError, ValueError, IndexError):
+                continue
+        return pids or [self.pid]
+
+    def _signal_all(self, sig):
+        for pid in self._session_pids():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, sig)
+
+    def kill(self):
+        """Beendet die Aufgabe wie das Schließen eines Terminalfensters (SIGHUP) – nach 3 s notfalls hart."""
+        if not self.running:
+            return
+        self.killing = True
+        self._signal_all(signal.SIGHUP)
+        self._signal_all(signal.SIGCONT)   # angehaltene Befehle (Strg+Z) sollen das Signal auch erhalten
+        self.loop.call_later(3, lambda: self.running and self._signal_all(signal.SIGTERM))
+        self.loop.call_later(6, lambda: self.running and self._signal_all(signal.SIGKILL))
 
 
 JOBS: dict[str, Job] = {}
 
 
+SHELL_IDLE = int(os.environ.get("BPUI_SHELL_IDLE", str(30 * 60)))
+
+
 def _prune_jobs():
+    # Host-Konsolen, die seit 30 Minuten niemand mehr offen hat, schließen
+    for j in list(JOBS.values()):
+        if j.kind == "shell" and j.running and not j.clients and time.time() - j.idle_since > SHELL_IDLE:
+            j.kill()
     done = sorted((j for j in JOBS.values() if not j.running), key=lambda j: j.ended or 0)
     while len(done) > 20:
         JOBS.pop(done.pop(0).id, None)
@@ -950,10 +983,15 @@ async def jobs_create(request: Request):
         return _err(401, "Nicht angemeldet")
     if not s.host_admin:
         return _err(403, "Diese Aktion ist nur für root@pam erlaubt – genau wie die Host-Shell in Proxmox.")
-    if sum(1 for j in JOBS.values() if j.running) >= MAX_RUNNING:
-        return _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig.")
     body = await request.json()
     kind = body.get("kind")
+    _prune_jobs()
+    if kind == "shell":
+        mine = next((j for j in JOBS.values() if j.kind == "shell" and j.running and j.owner == s.username and not j.killing), None)
+        if mine:
+            return JSONResponse({"data": {**mine.info(), "reused": True}})
+    elif sum(1 for j in JOBS.values() if j.running and j.kind != "shell") >= MAX_RUNNING:
+        return _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig. Bitte warten, bis eine fertig ist.")
     if kind == "script":
         path = body.get("path") or ""
         if not SCRIPT_PATH.match(path) or ".." in path:
@@ -1003,8 +1041,9 @@ async def job_socket(ws: WebSocket):
     if bytes(job.buffer):
         await ws.send_bytes(bytes(job.buffer))
     if not job.running:
-        await ws.send_text(json.dumps({"type": "exit", "code": job.exit_code}))
+        await ws.send_text(json.dumps({"type": "exit", "code": job.exit_code, "killed": job.killing}))
     job.clients.add(queue)
+    job.idle_since = time.time()
 
     async def sender():
         while True:
@@ -1040,6 +1079,7 @@ async def job_socket(ws: WebSocket):
         for t in tasks:
             t.cancel()
         job.clients.discard(queue)
+        job.idle_since = time.time()
         try:
             await ws.close()
         except Exception:
@@ -1156,9 +1196,16 @@ async def lifespan(app):
                 servers.append(await asyncio.start_server(lambda r, w: _front_handle(r, w, False), PUBLIC_BIND, HTTP_PORT, reuse_address=True))
             except OSError as e:
                 log.warning("Port %s für die http→https-Weiterleitung ist belegt (%s) – übersprungen.", HTTP_PORT, e)
+    async def housekeeping():
+        while True:
+            await asyncio.sleep(60)
+            with contextlib.suppress(Exception):
+                _prune_jobs()
+    hk = asyncio.create_task(housekeeping())
     try:
         yield
     finally:
+        hk.cancel()
         for srv in servers:
             srv.close()
 

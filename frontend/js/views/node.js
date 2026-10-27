@@ -2,7 +2,7 @@
 // Server: Systeminfos, Dienste, Protokoll, Festplatten, Netzwerk, Konsole
 // ===========================================================================
 import {
-  h, icon, clear, api, pve, state, bytes, uptime, nodePath, enc, errorToast, trackTask, openSheet, confirmDialog,
+  h, icon, clear, api, pve, state, bytes, uptime, nodePath, enc, errorToast, toast, trackTask, openSheet, confirmDialog,
   withBusy, pageHead, callout, loader, segmented,
 } from "../core.js";
 import { tlsCard } from "./tls.js";
@@ -31,7 +31,11 @@ export async function renderNode({ page, el, go }) {
     const consoleBtn = h("button", { class: "btn", disabled: !state.user.host_admin }, icon("terminal", "sm"), "Host-Konsole");
     consoleBtn.addEventListener("click", () => withBusy(consoleBtn, async () => {
       if (!await confirmDialog({ title: "Host-Konsole öffnen?", text: "Du bekommst eine root-Kommandozeile direkt auf dem Proxmox-Server. Dort ist alles erlaubt – Befehle mit Bedacht eingeben.", confirmText: "Öffnen" })) return;
-      try { const r = await api("/jobs", { method: "POST", body: { kind: "shell" } }); go(`job/${r.data.id}`); } catch (e) { errorToast(e); }
+      try {
+        const r = await api("/jobs", { method: "POST", body: { kind: "shell" } });
+        if (r.data.reused) toast("Konsole wieder verbunden", "Deine bereits offene Konsole wurde fortgesetzt.", "info");
+        go(`job/${r.data.id}`);
+      } catch (e) { errorToast(e); }
     }));
     clear(info).append(
       h("div", { class: "row wrap", style: { gap: "14px", marginBottom: "16px" } },

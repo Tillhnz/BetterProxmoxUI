@@ -156,31 +156,54 @@ export async function renderJob({ page, el, go }, id) {
     el.append(h("a", { class: "back", href: "#/apps" }, icon("chevronLeft", "sm"), "Apps"), empty("terminal", "Aufgabe nicht gefunden", "Sie ist vermutlich schon länger beendet."));
     return;
   }
+  // Je nach Art der Aufgabe: wohin zurück, wie heißt „Beenden“, wie streng die Warnung
+  const KIND = {
+    shell: { back: ["#/node", "Server"], stop: "Konsole schließen", confirm: { title: "Konsole schließen?", text: "Befehle, die gerade in der Konsole laufen, werden dabei beendet.", confirmText: "Schließen" },
+      hint: "Zum Beenden „exit“ eingeben oder oben auf „Konsole schließen“ tippen. Strg+C bricht einen laufenden Befehl ab." },
+    upgrade: { back: ["#/updates", "Updates"], stop: "Abbrechen", confirm: { title: "Updates wirklich abbrechen?", text: "Ein Abbruch mitten in der Installation kann Proxmox beschädigen. Nur abbrechen, wenn sich seit vielen Minuten nichts mehr tut.", confirmText: "Trotzdem abbrechen", danger: true },
+      hint: "Du kannst die Seite schließen – die Updates laufen weiter." },
+    selfupdate: { back: ["#/updates", "Updates"], stop: "Abbrechen", confirm: { title: "Abbrechen?", text: "Die Oberfläche wird dann eventuell nicht vollständig aktualisiert.", confirmText: "Abbrechen", danger: true }, hint: "Die Seite lädt gleich neu." },
+    script: { back: ["#/apps", "Apps"], stop: "Abbrechen", confirm: { title: "Installation abbrechen?", text: "Eine halb fertige Installation kann Reste hinterlassen (z. B. einen unfertigen Container).", confirmText: "Abbrechen", danger: true },
+      hint: "Tipp: Für die meisten Fragen einfach „Enter“ drücken. Du kannst die Seite schließen – die Installation läuft weiter." },
+  };
+  const k = KIND[info.kind] || KIND.script;
+  const isShell = info.kind === "shell";
+
   const badge = h("span", { class: "badge" });
-  const setStatus = (running, code) => {
-    badge.className = `badge ${running ? "accent" : code === 0 ? "ok" : "bad"}`;
-    clear(badge).append(running ? "Läuft" : code === 0 ? "Erfolgreich beendet" : `Beendet mit Fehler (${code})`);
+  const endActions = h("div", { class: "row wrap hidden", style: { marginBottom: "12px" } });
+  const setStatus = (running, code, killed) => {
+    badge.className = `badge ${running ? "accent" : isShell || killed ? "" : code === 0 ? "ok" : "bad"}`;
+    clear(badge).append(running ? (stopping ? "Wird beendet …" : "Läuft") : isShell ? "Geschlossen" : killed ? "Abgebrochen" : code === 0 ? "Erfolgreich beendet" : `Beendet mit Fehler (${code})`);
     killBtn.classList.toggle("hidden", !running);
     hint.classList.toggle("hidden", !running);
+    endActions.classList.toggle("hidden", running);
+    if (!running) {
+      clear(endActions).append(
+        isShell ? h("button", { class: "btn primary", onclick: async () => {
+          try { const r = await api("/jobs", { method: "POST", body: { kind: "shell" } }); go(`job/${r.data.id}`); } catch (e) { errorToast(e); }
+        } }, icon("terminal", "sm"), "Neue Konsole öffnen") : null,
+        h("a", { class: `btn ${isShell ? "" : "primary"}`, href: k.back[0] }, icon("chevronLeft", "sm"), `Zurück zu ${k.back[1]}`));
+    }
   };
-  const killBtn = h("button", { class: "btn danger-ghost sm" }, icon("x", "sm"), "Abbrechen");
+  let stopping = false, killedHere = false;
+  const killBtn = h("button", { class: `btn sm ${isShell ? "" : "danger-ghost"}` }, icon("x", "sm"), k.stop);
   killBtn.addEventListener("click", async () => {
-    if (!await confirmDialog({ title: "Wirklich abbrechen?", text: "Eine halb fertige Installation kann Reste hinterlassen.", confirmText: "Abbrechen", danger: true })) return;
-    try { await api(`/jobs/${id}/kill`, { method: "POST" }); } catch (e) { errorToast(e); }
+    if (!await confirmDialog(k.confirm)) return;
+    stopping = true; killedHere = true; killBtn.disabled = true; setStatus(true);
+    try { await api(`/jobs/${id}/kill`, { method: "POST" }); } catch (e) { errorToast(e); stopping = false; killBtn.disabled = false; setStatus(true); }
   });
-  const hint = h("div", { style: { marginBottom: "12px" } }, callout("info", null,
-    info.kind === "script" ? "Tipp: Für die meisten Fragen einfach „Enter“ drücken. Du kannst die Seite schließen – die Installation läuft weiter." : "Du kannst die Seite schließen – die Aufgabe läuft weiter."));
+  const hint = h("div", { style: { marginBottom: "12px" } }, callout("info", null, k.hint));
 
   const box = h("div", { class: "term-box" });
   const keys = [["Enter", "\r"], ["↑", "\x1b[A"], ["↓", "\x1b[B"], ["←", "\x1b[D"], ["→", "\x1b[C"], ["Tab", "\t"], ["Leertaste", " "], ["Esc", "\x1b"], ["y", "y"], ["n", "n"], ["Strg+C", "\x03"]];
   const keybar = h("div", { class: "keybar" });
 
   el.append(
-    h("a", { class: "back", href: "#/apps" }, icon("chevronLeft", "sm"), "Apps"),
+    h("a", { class: "back", href: k.back[0] }, icon("chevronLeft", "sm"), k.back[1]),
     h("div", { class: "row wrap", style: { marginBottom: "12px", gap: "10px" } }, h("h1", { style: { margin: 0, fontSize: "22px", letterSpacing: "-.02em" } }, info.title), badge, h("span", { class: "spacer" }), killBtn),
-    hint,
+    hint, endActions,
     h("div", { class: "term-shell" }, box, keybar));
-  setStatus(info.running, info.exit_code);
+  setStatus(info.running, info.exit_code, info.killed);
 
   let X;
   try { X = await loadXterm(); } catch { box.append(callout("bad", "Terminal konnte nicht geladen werden", "Bitte BetterProxmoxUI aktualisieren oder Internetverbindung prüfen.")); return; }
@@ -202,18 +225,18 @@ export async function renderJob({ page, el, go }, id) {
     ws.onopen = () => { try { fit.fit(); } catch { /* egal */ } send({ type: "resize", cols: term.cols, rows: term.rows }); };
     ws.onmessage = (e) => {
       if (typeof e.data === "string") {
-        try { const m = JSON.parse(e.data); if (m.type === "exit") { setStatus(false, m.code); notifyDone(m.code); } } catch { /* egal */ }
+        try { const m = JSON.parse(e.data); if (m.type === "exit") { stopping = false; setStatus(false, m.code, m.killed || info.killed || killedHere); notifyDone(m.code); } } catch { /* egal */ }
       } else term.write(new Uint8Array(e.data));
     };
     ws.onclose = () => {
       if (closedByUs) return;
-      if (!badge.textContent.startsWith("Läuft")) return;
+      if (!badge.textContent.startsWith("Läuft") || stopping) return;
       toast("Verbindung unterbrochen", "Die Aufgabe läuft weiter.", "info", { actions: [{ label: "Neu verbinden", onClick: connect }] });
     };
   }
   let notified = false;
   function notifyDone(code) {
-    if (notified || !info.running) return; notified = true;
+    if (notified || !info.running || isShell || killedHere) return; notified = true;
     toast(code === 0 ? `${info.title}: fertig` : `${info.title}: Fehler`, code === 0 ? "Scrolle im Terminal nach oben für Details wie Adresse oder Zugangsdaten." : "Details stehen im Terminal.", code === 0 ? "ok" : "bad", { timeout: 10000 });
   }
   term.onData((d) => send({ type: "input", data: d }));
