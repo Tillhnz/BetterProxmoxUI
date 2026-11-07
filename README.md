@@ -18,6 +18,7 @@ Eine schöne, einfache Oberfläche für **Proxmox VE** – für alle, die ihren 
 - **Sicherungen** – jetzt sichern, automatische Zeitpläne, Wiederherstellen (als neue Maschine oder Original ersetzen), Sicherungsdateien herunterladen (nur root@pam, nicht bei Proxmox Backup Server)
 - **Updates** – Proxmox-Updates prüfen und installieren, alle Container aktualisieren, Oberfläche selbst aktualisieren
 - **Großes Upgrade (Proxmox 8 → 9)** – Assistent mit Voraussetzungen (Version, Speicherplatz, Einzelserver, kein Ceph, frische Sicherungen, Notfall-Zugang), offizieller Prüfung `pve8to9` mit verständlichen Hinweisen, Umstellen der Paketquellen auf Debian 13 / Proxmox 9 (fremde Quellen werden abgeschaltet, alles rückgängig machbar) und einem Upgrade, das als eigenständiger Systemdienst läuft – unabhängig von Browser und Oberfläche. Danach passt sich die Oberfläche selbst an (neue Python-Version) und bietet den Neustart an. Cluster und Ceph werden bewusst nicht automatisch aktualisiert.
+- **Musik & Anlage** – macht den Audio-Ausgang des Servers (z. B. Klinke am ThinkCentre) zum Player für Music Assistant: legt per Klick einen winzigen Container mit Squeezelite an, reicht die Soundkarte durch, entstummt den Ausgang, Testton und Grundlautstärke; dazu eine Anleitung, wie der Player in Music Assistant als Spotify-Connect- und AirPlay-Ziel freigegeben wird (nur root@pam)
 - **Nur im Heimnetz erreichbar**, optimiert für Handy und Desktop, hell und dunkel
 
 ## Installation

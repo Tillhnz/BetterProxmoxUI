@@ -206,7 +206,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT
-chmod +x "$INSTALL_DIR/bin/start.sh" "$INSTALL_DIR/bin/cert.sh" "$INSTALL_DIR/install.sh"
+chmod +x "$INSTALL_DIR/bin/start.sh" "$INSTALL_DIR/bin/cert.sh" "$INSTALL_DIR/bin/audio-player.sh" "$INSTALL_DIR/install.sh"
 systemctl daemon-reload
 systemctl enable -q "$SERVICE"
 systemctl enable -q --now "${SERVICE}-cert.timer"

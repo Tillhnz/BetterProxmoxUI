@@ -15,6 +15,7 @@ import { renderStats } from "./js/views/stats.js";
 import { renderNode } from "./js/views/node.js";
 import { renderUsers } from "./js/views/users.js";
 import { renderUpgrade } from "./js/views/upgrade.js";
+import { renderAudio } from "./js/views/audio.js";
 import { tlsGuideSheet } from "./js/views/tls.js";
 
 const app = document.getElementById("app");
@@ -27,6 +28,7 @@ const NAV = [
   { path: "new", label: "Neu anlegen", short: "Neu", icon: "plus" },
   { path: "apps", label: "Apps", icon: "apps" },
   { path: "storage", label: "Speicher & NAS", icon: "network" },
+  { path: "audio", label: "Musik & Anlage", icon: "music" },
   { path: "advice", label: "Empfehlungen", icon: "shield" },
   { path: "stats", label: "Statistik", icon: "chart" },
   { path: "backups", label: "Sicherungen", icon: "archive" },
@@ -75,6 +77,7 @@ function route() {
     node: () => renderNode(ctx),
     users: () => renderUsers(ctx),
     upgrade: () => renderUpgrade(ctx),
+    audio: () => renderAudio(ctx),
   };
   (views[view] || views.dashboard)();
 }
@@ -156,6 +159,7 @@ function openMoreMenu() {
         item("server", "Server", () => go("node")),
         item("user", "Benutzer", () => go("users")),
         item("network", "Speicher & NAS", () => go("storage")),
+        item("music", "Musik & Anlage", () => go("audio")),
         item("refresh", "Updates", () => go("updates"), state.updatesCount ? h("span", { class: "badge count" }, state.updatesCount) : null),
         item("list", "Aktivität", () => go("tasks")),
         item("archive", "Sicherungen", () => go("backups")),

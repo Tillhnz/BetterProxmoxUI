@@ -163,6 +163,8 @@ export async function renderJob({ page, el, go }, id) {
     upgrade: { back: ["#/updates", "Updates"], stop: "Abbrechen", confirm: { title: "Updates wirklich abbrechen?", text: "Ein Abbruch mitten in der Installation kann Proxmox beschädigen. Nur abbrechen, wenn sich seit vielen Minuten nichts mehr tut.", confirmText: "Trotzdem abbrechen", danger: true },
       hint: "Du kannst die Seite schließen – die Updates laufen weiter." },
     selfupdate: { back: ["#/updates", "Updates"], stop: "Abbrechen", confirm: { title: "Abbrechen?", text: "Die Oberfläche wird dann eventuell nicht vollständig aktualisiert.", confirmText: "Abbrechen", danger: true }, hint: "Die Seite lädt gleich neu." },
+    audio: { back: ["#/audio", "Musik & Anlage"], stop: "Abbrechen", confirm: { title: "Abbrechen?", text: "Der Musik-Player ist dann eventuell nur halb eingerichtet. Du kannst das Einrichten später einfach wiederholen.", confirmText: "Abbrechen", danger: true },
+      hint: "Das dauert 1–3 Minuten. Du kannst die Seite schließen – es läuft weiter." },
     script: { back: ["#/apps", "Apps"], stop: "Abbrechen", confirm: { title: "Installation abbrechen?", text: "Eine halb fertige Installation kann Reste hinterlassen (z. B. einen unfertigen Container).", confirmText: "Abbrechen", danger: true },
       hint: "Tipp: Für die meisten Fragen einfach „Enter“ drücken. Du kannst die Seite schließen – die Installation läuft weiter." },
   };

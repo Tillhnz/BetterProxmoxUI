@@ -1434,6 +1434,178 @@ async def upgrade_info(request: Request):
     return JSONResponse({"data": data})
 
 
+
+# --------------------------------------------------------------------------
+# Musik über die Anlage: Player-Container (Squeezelite) für Music Assistant
+# --------------------------------------------------------------------------
+
+AUDIO_CFG = STATE_DIR / "audio.json"
+AUDIO_SCRIPT = f"{INSTALL_DIR}/bin/audio-player.sh"
+AUDIO_NAME = re.compile(r"^[\w äöüÄÖÜß.\-]{1,40}$")
+AUDIO_DEVICE = re.compile(r"^plughw:CARD=[A-Za-z0-9_]{1,32},DEV=\d{1,2}$")
+AUDIO_SERVER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,62}$")
+AUDIO_BRIDGE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{0,14}$")
+
+
+def _audio_outputs_sync() -> dict:
+    cards: dict[int, dict] = {}
+    with contextlib.suppress(OSError):
+        for line in Path("/proc/asound/cards").read_text().splitlines():
+            m = re.match(r"^\s*(\d+)\s+\[(\S+)\s*\]:\s*(\S+)\s+-\s+(.*)$", line)
+            if m:
+                idx = int(m.group(1))
+                cards[idx] = {"index": idx, "id": m.group(2), "driver": m.group(3), "name": m.group(4).strip(),
+                              "usb": Path(f"/proc/asound/card{idx}/usbid").exists()}
+    outputs = []
+    with contextlib.suppress(OSError):
+        for line in Path("/proc/asound/pcm").read_text().splitlines():
+            m = re.match(r"^(\d+)-(\d+):\s*([^:]*?)\s*:\s*([^:]*?)\s*:(.*)$", line)
+            if not m or "playback" not in m.group(5):
+                continue
+            card = cards.get(int(m.group(1)))
+            if not card:
+                continue
+            name = m.group(3) or m.group(4)
+            low = name.lower()
+            kind = "usb" if card["usb"] else "hdmi" if ("hdmi" in low or "displayport" in low) else \
+                "digital" if ("digital" in low or "spdif" in low or "iec958" in low) else "analog"
+            outputs.append({"device": f"plughw:CARD={card['id']},DEV={int(m.group(2))}", "card": card["id"], "card_name": card["name"],
+                            "name": name, "kind": kind})
+    order = {"usb": 0, "analog": 1, "digital": 2, "hdmi": 3}
+    outputs.sort(key=lambda o: (order[o["kind"]], o["device"]))
+    for i, o in enumerate(outputs):
+        o["recommended"] = i == 0 and o["kind"] in ("usb", "analog")
+    # Audio-Chip an eine VM durchgereicht oder ohne Treiber?
+    hint = None
+    if not outputs:
+        rc_out = ""
+        with contextlib.suppress(Exception):
+            rc_out = subprocess.run(["lspci", "-k"], capture_output=True, text=True, timeout=10).stdout
+        blocks = re.split(r"\n(?=\S)", rc_out)
+        audio = [b for b in blocks if re.search(r"Audio device|Multimedia audio", b)]
+        if not audio:
+            hint = "none"
+        elif all("vfio-pci" in b for b in audio):
+            hint = "vfio"
+        elif not any("Kernel driver in use" in b for b in audio):
+            hint = "driver"
+    return {"outputs": outputs, "hint": hint}
+
+
+def _audio_cfg() -> dict | None:
+    with contextlib.suppress(Exception):
+        d = json.loads(AUDIO_CFG.read_text())
+        if Path(f"/etc/pve/lxc/{int(d['vmid'])}.conf").exists():
+            return d
+    return None
+
+
+async def _audio_admin(request: Request):
+    s = await get_session(request)
+    if not s:
+        return None, _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return None, _err(403, "Den Musik-Player kann nur root@pam einrichten – er braucht Zugriff auf die Hardware des Servers.")
+    return s, None
+
+
+async def audio_info(request: Request):
+    s, err = await _audio_admin(request)
+    if err:
+        return err
+    data = await asyncio.to_thread(_audio_outputs_sync)
+    rc, out = await _run(["pveversion"], 20)
+    m = re.search(r"pve-manager/(\d+)\.(\d+)", out)
+    data["pve_ok"] = bool(m) and (int(m.group(1)), int(m.group(2))) >= (8, 1)
+    bridges = sorted(p.name for p in Path("/sys/class/net").glob("*") if (p / "bridge").exists())
+    data["bridges"] = bridges
+    data["busy"] = any(j.kind == "audio" and j.running for j in JOBS.values())
+    cfg = _audio_cfg()
+    player = None
+    if cfg:
+        vmid = str(int(cfg["vmid"]))
+        rc, out = await _run(["pct", "status", vmid], 20)
+        running = "running" in out
+        service = "stopped"
+        if running:
+            rc, out = await _run(["pct", "exec", vmid, "--", "systemctl", "is-active", "bpui-player"], 20)
+            service = out.strip() or "unknown"
+        player = {**cfg, "running": running, "service": service}
+    data["player"] = player
+    return JSONResponse({"data": data})
+
+
+def _audio_job(s, title: str, args: list[str]):
+    if any(j.kind == "audio" and j.running for j in JOBS.values()):
+        return None, _err(409, "Am Musik-Player wird gerade schon etwas gemacht.")
+    if sum(1 for j in JOBS.values() if j.running and j.kind != "shell") >= MAX_RUNNING:
+        return None, _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig. Bitte warten, bis eine fertig ist.")
+    job = Job(title, "audio", ["bash", AUDIO_SCRIPT, *args], s.username)
+    JOBS[job.id] = job
+    return job, None
+
+
+async def audio_setup(request: Request):
+    s, err = await _audio_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    name = str(body.get("name") or "").strip()
+    device = str(body.get("device") or "")
+    server = str(body.get("server") or "").strip()
+    bridge = str(body.get("bridge") or "vmbr0")
+    if not AUDIO_NAME.match(name):
+        return _err(400, "Bitte einen Namen mit Buchstaben, Zahlen, Leerzeichen, Punkt oder Bindestrich (max. 40 Zeichen).")
+    outs = (await asyncio.to_thread(_audio_outputs_sync))["outputs"]
+    if not AUDIO_DEVICE.match(device) or device not in {o["device"] for o in outs}:
+        return _err(400, "Dieser Audio-Ausgang wurde nicht gefunden.")
+    if server and not AUDIO_SERVER.match(server):
+        return _err(400, "Ungültige Adresse für Music Assistant")
+    if not AUDIO_BRIDGE.match(bridge) or not (Path("/sys/class/net") / bridge / "bridge").exists():
+        return _err(400, "Netzwerk-Brücke nicht gefunden")
+    job, err = _audio_job(s, "Musik-Player einrichten", ["setup", name, device, server or "-", bridge])
+    return err or JSONResponse({"data": job.info()})
+
+
+async def audio_action(request: Request):
+    s, err = await _audio_admin(request)
+    if err:
+        return err
+    action = request.path_params["action"]
+    if action == "driver":
+        rc, out = await _run(["bash", AUDIO_SCRIPT, "driver"], 60)
+        return JSONResponse({"ok": True}) if rc == 0 else _err(500, ANSI.sub("", out).strip()[-300:] or "Treiber konnte nicht geladen werden")
+    if not _audio_cfg():
+        return _err(404, "Es ist noch kein Musik-Player eingerichtet.")
+    if any(j.kind == "audio" and j.running for j in JOBS.values()):
+        return _err(409, "Am Musik-Player wird gerade schon etwas gemacht.")
+    if action == "test":
+        rc, out = await _run(["bash", AUDIO_SCRIPT, "test"], 60)
+        if rc != 0:
+            return _err(500, "Der Testton konnte nicht abgespielt werden. " + out.strip()[-300:])
+    elif action == "volume":
+        body = await request.json()
+        try:
+            v = int(body.get("value"))
+        except (TypeError, ValueError):
+            return _err(400, "Lautstärke fehlt")
+        if not 0 <= v <= 100:
+            return _err(400, "Lautstärke 0–100")
+        rc, out = await _run(["bash", AUDIO_SCRIPT, "volume", str(v)], 30)
+        if rc != 0:
+            return _err(500, out.strip()[-300:] or "Lautstärke konnte nicht gesetzt werden")
+    elif action == "restart":
+        rc, out = await _run(["bash", AUDIO_SCRIPT, "restart"], 60)
+        if rc != 0:
+            return _err(500, out.strip()[-300:] or "Neustart fehlgeschlagen")
+    elif action == "remove":
+        job, err = _audio_job(s, "Musik-Player entfernen", ["remove"])
+        return err or JSONResponse({"data": job.info()})
+    else:
+        return _err(404, "Unbekannte Aktion")
+    return JSONResponse({"ok": True})
+
+
 async def _admin_only(request: Request):
     s = await get_session(request)
     if not s:
@@ -1703,6 +1875,9 @@ routes = [
     Route("/api/health", health),
     Route("/api/tls", tls_info),
     Route("/api/backups/download", backup_download),
+    Route("/api/audio", audio_info),
+    Route("/api/audio/setup", audio_setup, methods=["POST"]),
+    Route("/api/audio/{action}", audio_action, methods=["POST"]),
     Route("/api/upgrade", upgrade_info),
     Route("/api/upgrade/check", upgrade_check, methods=["POST"]),
     Route("/api/upgrade/repos", upgrade_repos, methods=["POST", "DELETE"]),
