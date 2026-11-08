@@ -165,10 +165,13 @@ export async function renderJob({ page, el, go }, id) {
     selfupdate: { back: ["#/updates", "Updates"], stop: "Abbrechen", confirm: { title: "Abbrechen?", text: "Die Oberfläche wird dann eventuell nicht vollständig aktualisiert.", confirmText: "Abbrechen", danger: true }, hint: "Die Seite lädt gleich neu." },
     audio: { back: ["#/audio", "Musik & Anlage"], stop: "Abbrechen", confirm: { title: "Abbrechen?", text: "Der Musik-Player ist dann eventuell nur halb eingerichtet. Du kannst das Einrichten später einfach wiederholen.", confirmText: "Abbrechen", danger: true },
       hint: "Das dauert 1–3 Minuten. Du kannst die Seite schließen – es läuft weiter." },
+    "guest-update": { back: ["#/guests", "Maschinen"], stop: "Abbrechen", confirm: { title: "Update abbrechen?", text: "Ein Abbruch mitten im Installieren kann Pakete halb fertig zurücklassen. Nur abbrechen, wenn sich lange nichts mehr tut.", confirmText: "Trotzdem abbrechen", danger: true },
+      hint: "Du kannst die Seite schließen – das Update läuft weiter." },
     script: { back: ["#/apps", "Apps"], stop: "Abbrechen", confirm: { title: "Installation abbrechen?", text: "Eine halb fertige Installation kann Reste hinterlassen (z. B. einen unfertigen Container).", confirmText: "Abbrechen", danger: true },
       hint: "Tipp: Für die meisten Fragen einfach „Enter“ drücken. Du kannst die Seite schließen – die Installation läuft weiter." },
   };
-  const k = KIND[info.kind] || KIND.script;
+  const k = { ...(KIND[info.kind] || KIND.script) };
+  if (info.back) k.back = [info.back, info.back_label || "Zurück"];
   const isShell = info.kind === "shell";
 
   const badge = h("span", { class: "badge" });

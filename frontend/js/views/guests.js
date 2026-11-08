@@ -141,6 +141,7 @@ export async function renderGuestDetail({ page, el, go }, type, vmid, tabParam) 
         btnAction("restart", ["Neu starten", "Neustart"], "", async (b) => {
           if (await confirmDialog({ title: "Neu starten?", text: `„${name}“ wird neu gestartet.`, confirmText: "Neu starten" })) powerAction(type, vmid, "reboot", name, b);
         }),
+        state.user.host_admin ? btnAction("download", ["Aktualisieren", "Update"], "", () => updateSheet(type, vmid, name, go, currentIps)) : null,
       );
     }
     const consoleUrl = pveLink({ console: type === "qemu" ? "kvm" : "lxc", vmid, vmname: name, node: state.node });
@@ -313,6 +314,83 @@ function glanceCard(type, vmid, config, getIps, switchTab) {
 
   return h("div", { class: "card pad-0 glance", style: { marginTop: "14px" } },
     h("div", { class: "card-head", style: { padding: "16px 18px 4px", margin: 0 } }, icon("info"), h("h3", null, "Auf einen Blick")), list);
+}
+
+// ---------------------------------------------------------------------------
+// Update-Knopf: passenden Update-Befehl in der Maschine ausführen
+// ---------------------------------------------------------------------------
+function updateSheet(type, vmid, name, go, ips = []) {
+  openSheet(async (sheet, close) => {
+    const body = h("div", { class: "stack" }, loader());
+    sheet.append(h("h2", null, `„${name}“ aktualisieren`), body);
+    let info;
+    try { info = (await api(`/guests/${type}/${vmid}/update`)).data; }
+    catch (e) { clear(body).append(callout("bad", "Konnte nicht geprüft werden", e.message)); return; }
+    clear(body);
+    const start = async (btn, action, snapshot) => withBusy(btn, async () => {
+      try {
+        const r = await api(`/guests/${type}/${vmid}/update`, { method: "POST", body: { action, snapshot, name } });
+        close(); go(`job/${r.data.id}`);
+      } catch (e) { errorToast(e); }
+    });
+
+    if (!info.running) {
+      body.append(callout("info", "Die Maschine ist ausgeschaltet", "Updates lassen sich nur installieren, während sie läuft. Starte sie zuerst."));
+      return;
+    }
+    if (info.family === "haos") {
+      const ip = ips[0];
+      body.append(callout("info", "Home Assistant aktualisiert sich selbst",
+        "Home Assistant OS, Core und Add-ons werden in Home Assistant aktualisiert: Einstellungen → System → Updates. Dort steht auch, was neu ist."),
+      ip ? h("div", null, h("a", { class: "btn primary", href: `http://${ip}:8123/config/updates`, target: "_blank", rel: "noopener" }, icon("external", "sm"), "Updates in Home Assistant öffnen")) : null);
+      return;
+    }
+    if (info.family === "windows") {
+      body.append(callout("info", "Windows aktualisiert sich selbst", "In der VM: Start → Einstellungen → Windows Update → „Nach Updates suchen“."));
+      return;
+    }
+    if (type === "qemu" && !info.agent) {
+      body.append(callout("warn", "QEMU-Gast-Agent fehlt",
+        "Ohne den Agenten kann die Zentrale nichts in der VM ausführen. So richtest du ihn einmalig ein:"),
+      h("ol", { class: "plain-list", style: { margin: "0 0 0 18px", listStyle: "decimal" } },
+        h("li", null, "In der VM installieren, z. B. bei Debian/Ubuntu: ", h("code", { class: "mono" }, "apt install qemu-guest-agent")),
+        h("li", null, "Hier unter Einstellungen → Optionen „QEMU-Agent“ einschalten."),
+        h("li", null, "Die VM einmal herunterfahren und wieder starten.")));
+      return;
+    }
+    if (!info.family) {
+      body.append(callout("warn", "System nicht erkannt", `${info.os_name ? `„${info.os_name}“` : "Dieses System"} kennt die Zentrale noch nicht. Bitte über die Konsole von Hand aktualisieren.`));
+      return;
+    }
+
+    let snapshot = !!info.snapshot_ok;
+    const sysBtn = h("button", { class: "btn primary" }, icon("download", "sm"), "System aktualisieren");
+    sysBtn.addEventListener("click", () => start(sysBtn, "system", snapshot));
+    const copyBtn = h("button", { class: "btn sm ghost", title: "Befehl kopieren", onclick: async () => {
+      try { await navigator.clipboard.writeText(info.command); toast("Befehl kopiert"); } catch { /* egal */ }
+    } }, icon("copy", "sm"));
+    body.append(
+      h("p", { class: "muted", style: { margin: 0 } }, info.os_name ? `Erkannt: ${info.os_name}. ` : "",
+        type === "lxc" ? "Der Befehl läuft direkt im Container." : "Der Befehl läuft über den QEMU-Gast-Agenten in der VM."),
+      h("div", null, h("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "6px" } },
+        h("strong", null, "Dieser Befehl wird ausgeführt"), copyBtn),
+      h("pre", { class: "cmd-box" }, info.command)),
+      toggle("Vorher Snapshot anlegen", info.snapshot_ok ? "Falls nach dem Update etwas nicht klappt, kannst du zurückspringen. Die letzten 3 bleiben, ältere werden aufgeräumt."
+        : "Der Speicher dieser Maschine kann keine Snapshots – vorher besser eine Sicherung machen.", snapshot, (v) => { snapshot = v; }),
+      h("div", { class: "row wrap" }, sysBtn));
+    if (!info.snapshot_ok) body.querySelector(".toggle input").disabled = true;
+
+    if (info.app_update) {
+      const appBtn = h("button", { class: "btn" }, icon("apps", "sm"), "App aktualisieren");
+      appBtn.addEventListener("click", () => start(appBtn, "app", snapshot));
+      body.append(h("div", { class: "card flat", style: { marginTop: "6px" } },
+        h("strong", null, "Die App selbst aktualisieren"),
+        h("p", { class: "muted", style: { margin: "4px 0 10px" } },
+          "Dieser Container wurde mit den Community-Scripts installiert. Deren Update-Skript bringt die App selbst (z. B. Immich oder Paperless) auf die neueste Version – das machen die System-Updates nicht. Befehl im Container: ",
+          h("code", { class: "mono" }, "update")),
+        h("div", { class: "row wrap" }, appBtn)));
+    }
+  });
 }
 
 function btnAction(ico, label, cls, fn) {

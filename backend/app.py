@@ -22,6 +22,7 @@ import os
 import pty
 import re
 import secrets
+import socket
 import shutil
 import signal
 import ssl
@@ -861,6 +862,8 @@ class Job:
         self.buffer = bytearray()
         self.clients: set[asyncio.Queue] = set()
         self.killing = False
+        self.back: str | None = None        # wohin „Zurück“ auf der Aufgabenseite führt
+        self.back_label: str | None = None
         self.idle_since = time.time()   # seit wann niemand mehr zuschaut
         self.loop = asyncio.get_running_loop()
 
@@ -887,7 +890,7 @@ class Job:
     def info(self) -> dict:
         return {"id": self.id, "title": self.title, "kind": self.kind, "owner": self.owner,
                 "started": self.started, "ended": self.ended, "running": self.running,
-                "exit_code": self.exit_code, "killed": self.killing}
+                "exit_code": self.exit_code, "killed": self.killing, "back": self.back, "back_label": self.back_label}
 
     def _broadcast(self, item):
         for q in list(self.clients):
@@ -1637,6 +1640,97 @@ async def audio_action(request: Request):
     return JSONResponse({"ok": True})
 
 
+
+# --------------------------------------------------------------------------
+# Maschinen aktualisieren (Update-Knopf pro Container/VM)
+# --------------------------------------------------------------------------
+
+GUEST_UPDATE_SCRIPT = f"{INSTALL_DIR}/bin/guest-update.py"
+_APT = "apt-get update && apt-get -y dist-upgrade && apt-get -y autoremove --purge && apt-get clean"
+UPDATE_COMMANDS = {
+    "apt": _APT, "apk": "apk update && apk upgrade", "pacman": "pacman -Syu --noconfirm",
+    "dnf": "dnf -y upgrade", "zypper": "zypper --non-interactive refresh && zypper --non-interactive update",
+}
+
+
+def _os_family(os_id: str, like: str = "") -> str | None:
+    words = f" {os_id} {like} ".lower()
+    for fam, keys in (("haos", ["haos"]), ("windows", ["mswindows", "windows"]), ("apt", ["debian", "ubuntu"]),
+                      ("apk", ["alpine"]), ("pacman", ["arch"]), ("dnf", ["fedora", "rhel", "centos"]),
+                      ("zypper", ["suse", "opensuse"])):
+        if any(f" {k} " in words for k in keys):
+            return fam
+    return None
+
+
+async def guest_update_info(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return _err(403, "Updates in Maschinen kann nur root@pam starten.")
+    gtype, vmid = request.path_params["gtype"], request.path_params["vmid"]
+    if gtype not in ("lxc", "qemu") or not vmid.isdigit():
+        return _err(400, "Ungültige Maschine")
+    tool = "pct" if gtype == "lxc" else "qm"
+    rc, out = await _run([tool, "status", vmid], 20)
+    if rc != 0:
+        return _err(404, "Maschine nicht gefunden")
+    info = {"type": gtype, "running": "running" in out, "family": None, "os_name": None,
+            "app_update": False, "agent": None, "command": None, "snapshot_ok": False}
+    if gtype == "lxc":
+        if info["running"]:
+            rc, out = await _run(["pct", "exec", vmid, "--", "sh", "-c",
+                                  '. /etc/os-release 2>/dev/null; echo "$ID"; echo "$ID_LIKE"; echo "$PRETTY_NAME"; '
+                                  'test -x /usr/bin/update && echo APP'], 30)
+            lines = (out.splitlines() + ["", "", ""])[:4]
+            if rc == 0:
+                info["family"] = _os_family(lines[0], lines[1])
+                info["os_name"] = lines[2] or lines[0] or None
+                info["app_update"] = "APP" in out.split()
+    elif info["running"]:
+        rc, out = await _run(["qm", "agent", vmid, "get-osinfo"], 20)
+        info["agent"] = rc == 0
+        if rc == 0:
+            with contextlib.suppress(Exception):
+                d = json.loads(out)
+                info["family"] = _os_family(str(d.get("id", "")), "")
+                info["os_name"] = d.get("pretty-name") or d.get("name")
+    info["command"] = UPDATE_COMMANDS.get(info["family"] or "")
+    with contextlib.suppress(Exception):
+        node = socket.gethostname()
+        _, res = await pve_call("GET", f"/nodes/{node}/{gtype}/{vmid}/feature", s.ticket, s.csrf, query="feature=snapshot")
+        info["snapshot_ok"] = bool((res.get("data") or {}).get("hasFeature"))
+    return JSONResponse({"data": info})
+
+
+async def guest_update_start(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return _err(403, "Updates in Maschinen kann nur root@pam starten.")
+    gtype, vmid = request.path_params["gtype"], request.path_params["vmid"]
+    if gtype not in ("lxc", "qemu") or not vmid.isdigit():
+        return _err(400, "Ungültige Maschine")
+    body = await request.json()
+    action = body.get("action", "system")
+    if action not in ("system", "app") or (action == "app" and gtype != "lxc"):
+        return _err(400, "Unbekannte Aktion")
+    _prune_jobs()
+    if any(j.running and j.kind == "guest-update" and j.back == f"#/guest/{gtype}/{vmid}" for j in JOBS.values()):
+        return _err(409, "Für diese Maschine läuft schon ein Update.")
+    if sum(1 for j in JOBS.values() if j.running and j.kind != "shell") >= MAX_RUNNING:
+        return _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig. Bitte warten, bis eine fertig ist.")
+    name = str(body.get("name") or f"#{vmid}")[:60]
+    title = f"{name} aktualisieren" if action == "system" else f"App in {name} aktualisieren"
+    job = Job(title, "guest-update", ["python3", GUEST_UPDATE_SCRIPT, gtype, vmid, action, "1" if body.get("snapshot") else "0"], s.username)
+    job.back = f"#/guest/{gtype}/{vmid}"
+    job.back_label = name
+    JOBS[job.id] = job
+    return JSONResponse({"data": job.info()})
+
+
 async def _admin_only(request: Request):
     s = await get_session(request)
     if not s:
@@ -1929,6 +2023,8 @@ routes = [
     Route("/api/host/ls", host_ls),
     Route("/api/host/checks", host_checks),
     Route("/api/guests/{gtype}/{vmid}/unlock", guest_unlock, methods=["POST"]),
+    Route("/api/guests/{gtype}/{vmid}/update", guest_update_info),
+    Route("/api/guests/{gtype}/{vmid}/update", guest_update_start, methods=["POST"]),
     Route("/api/host/mkdir", host_mkdir, methods=["POST"]),
     Route("/api/jobs", jobs_list, methods=["GET"]),
     Route("/api/jobs", jobs_create, methods=["POST"]),
