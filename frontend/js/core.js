@@ -155,6 +155,11 @@ export async function pve(method, path, body) {
 }
 export const enc = encodeURIComponent;
 export const nodePath = (p = "") => `/nodes/${enc(state.node)}${p}`;
+// Link zur Proxmox-Oberfläche (Port 8006) – über die Zentrale, damit man dort schon angemeldet ist
+export const pveLink = (params = {}) => {
+  const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "")).toString();
+  return "/api/open-pve" + (q ? "?" + q : "");
+};
 
 // ---------- Formatierung ----------
 export function bytes(n, digits = 1) {

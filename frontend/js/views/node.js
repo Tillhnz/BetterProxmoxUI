@@ -4,6 +4,7 @@
 import {
   h, icon, clear, api, pve, state, bytes, uptime, nodePath, enc, errorToast, toast, trackTask, openSheet, confirmDialog,
   withBusy, pageHead, callout, loader, segmented,
+  pveLink,
 } from "../core.js";
 import { tlsCard } from "./tls.js";
 
@@ -42,7 +43,7 @@ export async function renderNode({ page, el, go }) {
         h("div", { class: "guest-icon ct", style: { width: "52px", height: "52px", borderRadius: "15px" } }, icon("server", "lg")),
         h("div", { style: { flex: 1, minWidth: "200px" } }, h("h3", { style: { fontSize: "18px" } }, state.node),
           h("div", { class: "muted" }, `Proxmox VE ${ver?.version || ""} · läuft seit ${uptime(st.uptime)}`)),
-        h("div", { class: "action-bar" }, consoleBtn, h("a", { class: "btn", href: `https://${location.hostname}:8006/`, target: "_blank", rel: "noopener" }, icon("external", "sm"), "Proxmox-Oberfläche"))),
+        h("div", { class: "action-bar" }, consoleBtn, h("a", { class: "btn", href: pveLink(), target: "_blank", rel: "noopener" }, icon("external", "sm"), "Proxmox-Oberfläche"))),
       h("div", { class: "kv" },
         kv("Prozessor", st.cpuinfo ? `${st.cpuinfo.model}` : "–"),
         kv("Kerne / Threads", st.cpuinfo ? (st.cpuinfo.cores ? `${st.cpuinfo.cores * (st.cpuinfo.sockets || 1)} / ${st.cpuinfo.cpus}` : `${st.cpuinfo.cpus} Threads`) : "–"),
@@ -152,7 +153,7 @@ export async function renderNode({ page, el, go }) {
   }
 
   function drawMore() {
-    const base = `https://${location.hostname}:8006/`;
+    const base = pveLink();
     const item = (ico, title, text) => h("a", { class: "list-item clickable", href: base, target: "_blank", rel: "noopener", style: { color: "var(--text)" } },
       h("div", { class: "guest-icon" }, icon(ico)), h("div", { class: "grow" }, h("div", { class: "title" }, title), h("div", { class: "meta", style: { whiteSpace: "normal" } }, text)), icon("external", "sm"));
     clear(body).append(

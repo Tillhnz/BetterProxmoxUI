@@ -51,6 +51,7 @@ FRONTEND_DIR = Path(os.environ.get("BPUI_FRONTEND_DIR", BASE_DIR / "frontend"))
 VERSION = (BASE_DIR / "VERSION").read_text().strip() if (BASE_DIR / "VERSION").exists() else "dev"
 
 PVE_URL = os.environ.get("BPUI_PVE_URL", "https://127.0.0.1:8006").rstrip("/")
+PVE_PUBLIC_PORT = int(os.environ.get("BPUI_PVE_PUBLIC_PORT", "8006"))
 PVE_CA = os.environ.get("BPUI_PVE_CA", "/etc/pve/pve-root-ca.pem")
 # Zusätzlich erlaubte Netze (kommagetrennt), z. B. "100.64.0.0/10" für Tailscale.
 EXTRA_NETS = [n.strip() for n in os.environ.get("BPUI_ALLOW_NETS", "").split(",") if n.strip()]
@@ -219,6 +220,36 @@ async def get_session(request: Request | WebSocket) -> Session | None:
                     SESSIONS.pop(s.id, None)
                     return None
     return s
+
+
+
+async def open_pve(request: Request):
+    """Öffnet die Proxmox-Oberfläche (Port 8006) bereits angemeldet – z. B. für die Konsole einer Maschine.
+
+    Cookies gelten pro Rechnername, nicht pro Port: Setzen wir hier das Proxmox-Anmelde-Cookie mit dem
+    Ticket der aktuellen Sitzung, ist man auf :8006 automatisch angemeldet (sonst „401 No ticket“)."""
+    qp = request.query_params
+    target = {}
+    console = qp.get("console", "")
+    if console in ("kvm", "lxc", "shell"):
+        target = {"console": console, "novnc": "1", "node": qp.get("node", ""), "resize": "off", "cmd": ""}
+        if console != "shell":
+            vmid = qp.get("vmid", "")
+            if not vmid.isdigit():
+                return _err(400, "vmid fehlt")
+            target |= {"vmid": vmid, "vmname": qp.get("vmname", "")[:64]}
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,62}", target["node"]):
+            return _err(400, "Ungültiger Server")
+    host = request.url.hostname or "localhost"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    url = f"https://{host}:{PVE_PUBLIC_PORT}/" + (("?" + urllib.parse.urlencode(target)) if target else "")
+    resp = Response(status_code=302, headers={"Location": url, "Cache-Control": "no-store"})
+    s = await get_session(request)
+    if s:
+        # Wie Proxmox selbst: nicht HttpOnly, damit die Proxmox-Seite das Cookie lesen kann
+        resp.headers.append("Set-Cookie", f"PVEAuthCookie={urllib.parse.quote(s.ticket, safe='')}; Path=/; Secure; SameSite=Lax; Max-Age=7000")
+    return resp
 
 
 def _set_cookie(resp: Response, sid: str):
@@ -1875,6 +1906,7 @@ routes = [
     Route("/api/health", health),
     Route("/api/tls", tls_info),
     Route("/api/backups/download", backup_download),
+    Route("/api/open-pve", open_pve),
     Route("/api/audio", audio_info),
     Route("/api/audio/setup", audio_setup, methods=["POST"]),
     Route("/api/audio/{action}", audio_action, methods=["POST"]),

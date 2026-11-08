@@ -3,6 +3,7 @@ import {
   toast, errorToast, trackTask, confirmDialog, openSheet, field, input, select, toggle, withBusy, pageHead, empty, relTime,
   guestTypeLabel, dateTime, api, lockBadge, LOCK_TEXT, taskName, parseUpid,
   tabBar,
+  pveLink,
 } from "../core.js";
 import { statsSection, sizingSection, hardwareCard, optionsCard, actionsCard, historyCard } from "./guestExtra.js";
 import { guestBackupSection, jobsCovering, describeSchedule, loadBackupItems } from "./backups.js";
@@ -142,8 +143,8 @@ export async function renderGuestDetail({ page, el, go }, type, vmid, tabParam) 
         }),
       );
     }
-    const consoleUrl = `https://${location.hostname}:8006/?console=${type === "qemu" ? "kvm" : "lxc"}&novnc=1&vmid=${vmid}&vmname=${enc(name)}&node=${enc(state.node)}&resize=off&cmd=`;
-    actions.append(h("a", { class: "btn", href: consoleUrl, target: "_blank", rel: "noopener", title: "Öffnet sich in der Proxmox-Oberfläche (eventuell dort einmal anmelden)" }, icon("terminal", "sm"), "Konsole"));
+    const consoleUrl = pveLink({ console: type === "qemu" ? "kvm" : "lxc", vmid, vmname: name, node: state.node });
+    actions.append(h("a", { class: "btn", href: consoleUrl, target: "_blank", rel: "noopener", title: "Öffnet die Konsole in einem neuen Tab" }, icon("terminal", "sm"), "Konsole"));
     if (running) actions.append(h("button", { class: "btn icon", title: "Weitere Aktionen", "aria-label": "Weitere Aktionen", onclick: () => openSheet((sheet, close) => {
       const item = (ico, label, sub, fn, danger) => h("div", { class: "list-item clickable", onclick: () => { close(); fn(); } },
         h("div", { class: "guest-icon", style: danger ? { background: "var(--bad-soft)", color: "var(--bad)" } : null }, icon(ico)),

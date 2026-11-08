@@ -4,6 +4,7 @@
 import {
   h, icon, clear, api, pve, state, bytes, pct, nodePath, enc, toast, errorToast, confirmDialog, withBusy, pageHead, callout,
   relTime, guestIcon, LOCK_TEXT,
+  pveLink,
 } from "../core.js";
 import { unlockFlow } from "./guests.js";
 import { analyzeAll, applySizing } from "../sizing.js";
@@ -250,7 +251,7 @@ export async function runChecks({ force = false } = {}) {
     if (!enabled.length) add({ id: "tfa", level: "warn", cat: "sicherheit", title: `Zwei-Faktor-Anmeldung für ${state.user.username} ist aus`,
       why: "Wer dein Passwort errät oder abfängt, hat sonst sofort volle Kontrolle über alle Maschinen.",
       todo: "In Proxmox unter Rechenzentrum → Berechtigungen → Zwei-Faktor eine Authenticator-App (TOTP) hinzufügen. Diese Oberfläche fragt den Code danach automatisch ab.",
-      actions: [{ label: "Proxmox öffnen", external: `https://${location.hostname}:8006/` }] });
+      actions: [{ label: "Proxmox öffnen", external: pveLink() }] });
     else add({ id: "tfa-ok", level: "ok", cat: "sicherheit", title: "Zwei-Faktor-Anmeldung ist aktiv" });
   }
   const privileged = guests.filter(g => g.type === "lxc" && configs.get(g.vmid) && !(configs.get(g.vmid).unprivileged === 1 || configs.get(g.vmid).unprivileged === "1"));
