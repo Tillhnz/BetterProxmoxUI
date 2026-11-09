@@ -190,7 +190,8 @@ export function actionsCard(type, vmid, base, config, name, statusFn, go) {
   const others = state.nodes.filter(n => n.node !== state.node && n.status === "online");
   const mig = others.length ? h("button", { class: "btn" }, icon("server", "sm"), "Auf anderen Server verschieben") : null;
   mig && mig.addEventListener("click", () => migrateSheet(type, base, name, others, statusFn, go));
-  return card("sparkle", "Weitere Aktionen", h("div", { class: "action-bar" }, clone, tpl, mig),
+  const conv = type === "qemu" && state.user.host_admin ? h("a", { class: "btn", href: `#/convert/${vmid}` }, icon("box", "sm"), "In Container umwandeln") : null;
+  return card("sparkle", "Weitere Aktionen", h("div", { class: "action-bar" }, clone, tpl, mig, conv),
     h("p", { class: "muted small" }, "Klonen erstellt eine unabhängige Kopie – praktisch zum Testen, bevor du etwas am Original änderst."));
 }
 

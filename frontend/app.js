@@ -16,6 +16,7 @@ import { renderNode } from "./js/views/node.js";
 import { renderUsers } from "./js/views/users.js";
 import { renderUpgrade } from "./js/views/upgrade.js";
 import { renderAudio } from "./js/views/audio.js";
+import { renderConvert } from "./js/views/convert.js";
 import { tlsGuideSheet } from "./js/views/tls.js";
 
 const app = document.getElementById("app");
@@ -68,6 +69,7 @@ function route() {
     new: () => (a === "lxc" ? renderNewLxc(ctx) : a === "vm" ? renderNewVm(ctx) : renderNew(ctx)),
     apps: () => renderApps(ctx),
     job: () => renderJob(ctx, a),
+    convert: () => renderConvert(ctx, a),
     backups: () => renderBackups(ctx, a),
     updates: () => renderUpdates(ctx),
     tasks: () => renderTasks(ctx),

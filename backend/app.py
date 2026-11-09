@@ -1795,6 +1795,154 @@ async def guest_update_start(request: Request):
     return JSONResponse({"data": job.info()})
 
 
+
+# --------------------------------------------------------------------------
+# Umwandlungs-Assistent: VM → Container (LXC)
+# --------------------------------------------------------------------------
+
+VM2LXC_SCRIPT = f"{INSTALL_DIR}/bin/vm2lxc.py"
+CONVERT_INSPECT: dict[str, dict] = {}   # letzte Analyse je VM (die Pläne bauen darauf auf)
+
+
+async def _convert_admin(request: Request):
+    s = await get_session(request)
+    if not s:
+        return None, _err(401, "Nicht angemeldet")
+    if not s.host_admin:
+        return None, _err(403, "VMs umwandeln kann nur root@pam – dafür werden die Festplatten auf dem Server gelesen.")
+    return s, None
+
+
+async def _rootdir_storages() -> list[dict]:
+    rc, out = await _run(["pvesm", "status", "--content", "rootdir"], 30)
+    res = []
+    for line in out.splitlines()[1:]:
+        p = line.split()
+        if len(p) >= 7 and p[2] == "active":
+            with contextlib.suppress(ValueError):
+                res.append({"storage": p[0], "type": p[1], "avail": int(p[5]) * 1024, "total": int(p[3]) * 1024})
+    return res
+
+
+async def convert_inspect(request: Request):
+    s, err = await _convert_admin(request)
+    if err:
+        return err
+    vmid = request.path_params["vmid"]
+    if not vmid.isdigit() or not Path(f"/etc/pve/qemu-server/{vmid}.conf").exists():
+        return _err(404, "VM nicht gefunden")
+    if any(j.running and j.kind == "convert" for j in JOBS.values()):
+        return _err(409, "Es läuft gerade schon eine Umwandlung.")
+    rc, out = await _run(["python3", VM2LXC_SCRIPT, "inspect", vmid], 180)
+    try:
+        data = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return _err(500, "Analyse fehlgeschlagen: " + out.strip()[-400:])
+    CONVERT_INSPECT[vmid] = data
+    rc, nextid = await _run(["pvesh", "get", "/cluster/nextid"], 20)
+    data["nextid"] = int(nextid.strip()) if nextid.strip().isdigit() else None
+    data["storages"] = await _rootdir_storages()
+    data["bridges"] = sorted(p.name for p in Path("/sys/class/net").glob("*") if (p / "bridge").exists())
+    return JSONResponse({"data": data})
+
+
+async def convert_start(request: Request):
+    s, err = await _convert_admin(request)
+    if err:
+        return err
+    vmid = request.path_params["vmid"]
+    insp = CONVERT_INSPECT.get(vmid)
+    if not insp:
+        return _err(409, "Bitte die Analyse neu laden.")
+    if insp.get("blockers"):
+        return _err(400, insp["blockers"][0])
+    if any(j.running and j.kind == "convert" for j in JOBS.values()):
+        return _err(409, "Es läuft gerade schon eine Umwandlung.")
+    if sum(1 for j in JOBS.values() if j.running and j.kind != "shell") >= MAX_RUNNING:
+        return _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig. Bitte warten, bis eine fertig ist.")
+    b = await request.json()
+    try:
+        ctid = int(b["ctid"])
+        cores, memory, swap, rootfs_gb = int(b["cores"]), int(b["memory"]), int(b.get("swap", 512)), int(b["rootfs_gb"])
+    except (KeyError, TypeError, ValueError):
+        return _err(400, "Angaben unvollständig")
+    if not 100 <= ctid <= 999999999 or Path(f"/etc/pve/lxc/{ctid}.conf").exists() or Path(f"/etc/pve/qemu-server/{ctid}.conf").exists():
+        return _err(400, f"Die Nummer {ctid} ist ungültig oder schon vergeben.")
+    hostname = str(b.get("hostname", ""))
+    if not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", hostname):
+        return _err(400, "Ungültiger Name (Buchstaben, Zahlen, Bindestriche)")
+    if not (1 <= cores <= 512 and 64 <= memory <= 4194304 and 0 <= swap <= 1048576 and 1 <= rootfs_gb <= 65536):
+        return _err(400, "Ungültige Größenangaben")
+    storages = {x["storage"]: x for x in await _rootdir_storages()}
+    storage = str(b.get("storage", ""))
+    if storage not in storages:
+        return _err(400, "Speicherort nicht gefunden")
+    bridges = {p.name for p in Path("/sys/class/net").glob("*") if (p / "bridge").exists()}
+    nics = []
+    for n in b.get("nics") or []:
+        bridge = str(n.get("bridge", ""))
+        if bridge not in bridges:
+            return _err(400, f"Netzwerk-Brücke {bridge} nicht gefunden")
+        mac = str(n.get("mac") or "")
+        if mac and not re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac):
+            return _err(400, "Ungültige MAC-Adresse")
+        tag = n.get("tag")
+        if tag not in (None, "") and not (str(tag).isdigit() and 1 <= int(tag) <= 4094):
+            return _err(400, "Ungültiges VLAN")
+        ip, gw = str(n.get("ip") or "dhcp"), str(n.get("gw") or "")
+        try:
+            if ip != "dhcp":
+                ipaddress.ip_interface(ip)
+                if "/" not in ip:
+                    raise ValueError
+            if gw:
+                ipaddress.ip_address(gw)
+        except ValueError:
+            return _err(400, f"Ungültige IP-Adresse „{ip}“ – bitte mit Netzmaske, z. B. 192.168.1.20/24")
+        nics.append({"bridge": bridge, "mac": mac or None, "tag": int(tag) if str(tag or "").isdigit() else None,
+                     "firewall": bool(n.get("firewall")), "ip": ip, "gw": gw or None})
+    if not nics:
+        return _err(400, "Mindestens ein Netzwerk wird gebraucht")
+    choices = {m.get("target"): m for m in b.get("mounts") or []}
+    mounts, need = [], rootfs_gb
+    for m in insp.get("mounts", []):
+        c = choices.get(m["target"], {})
+        item = {k: m[k] for k in ("target", "kind", "fstype", "source") if k in m}
+        if m["kind"] == "disk":
+            item["action"] = "skip" if c.get("action") == "skip" else "copy"
+            item["used"] = m.get("used") or 0
+            try:
+                item["size_gb"] = max(1, min(65536, int(c.get("size_gb") or 0)))
+            except (TypeError, ValueError):
+                return _err(400, "Ungültige Laufwerksgröße")
+            if item["action"] == "copy":
+                need += item["size_gb"]
+        else:
+            action = c.get("action") if c.get("action") in ("bind", "mount", "skip") else "skip"
+            item["action"] = action
+            if action == "bind":
+                hp = str(c.get("host_path") or "")
+                if not (HOST_PATH.match(hp) and ".." not in hp and os.path.isdir(hp)):
+                    return _err(400, f"Ordner {hp or '?'} auf dem Server nicht gefunden")
+                item["host_path"] = hp
+        mounts.append(item)
+    if storages[storage]["type"] not in ("zfspool", "lvmthin", "btrfs") and need * 1024**3 > storages[storage]["avail"]:
+        return _err(400, f"Auf „{storage}“ ist nicht genug Platz frei (gebraucht: {need} GB).")
+    plan = {"vmid": int(vmid), "ctid": ctid, "hostname": hostname, "cores": cores, "memory": memory, "swap": swap,
+            "storage": storage, "rootfs_gb": rootfs_gb, "onboot": bool(b.get("onboot")), "tags": insp.get("tags") or "",
+            "nics": nics, "mounts": mounts, "compose": insp.get("compose") or [], "start": bool(b.get("start", True)),
+            "immich": bool(insp.get("immich")), "dri": bool(b.get("dri")) and bool(insp.get("dri")),
+            "root_used": (insp.get("root") or {}).get("used") or 0}
+    plan_path = STATE_DIR / f"convert-{vmid}.json"
+    plan_path.write_text(json.dumps(plan))
+    os.chmod(plan_path, 0o600)
+    job = Job(f"{insp.get('name') or vmid} in Container umwandeln", "convert", ["python3", VM2LXC_SCRIPT, "convert", str(plan_path)], s.username)
+    job.back, job.back_label = "#/guests", "Maschinen"
+    JOBS[job.id] = job
+    CONVERT_INSPECT.pop(vmid, None)
+    return JSONResponse({"data": job.info()})
+
+
 async def _admin_only(request: Request):
     s = await get_session(request)
     if not s:
@@ -2065,6 +2213,8 @@ routes = [
     Route("/api/tls", tls_info),
     Route("/api/backups/download", backup_download),
     Route("/api/open-pve", open_pve),
+    Route("/api/convert/{vmid}", convert_inspect),
+    Route("/api/convert/{vmid}", convert_start, methods=["POST"]),
     Route("/api/audio", audio_info),
     Route("/api/audio/setup", audio_setup, methods=["POST"]),
     Route("/api/audio/{action}", audio_action, methods=["POST"]),

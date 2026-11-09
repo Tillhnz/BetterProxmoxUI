@@ -612,3 +612,11 @@ h2.section.hide-sm-block { display: flex; }
 /* ---------- Update-Befehl ---------- */
 .cmd-box { margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line);
   font-family: var(--mono); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+
+/* ---------- Umwandlungs-Assistent ---------- */
+@media (max-width: 640px) {
+  .conv-ctl { flex-basis: 100%; padding-left: 0; }
+  .conv-ctl .segmented button { padding-left: 10px; padding-right: 10px; }
+  .conv-ctl .segmented { flex: 1; min-width: 0; }
+  .conv-ctl .input { width: 84px !important; flex: none; }
+}

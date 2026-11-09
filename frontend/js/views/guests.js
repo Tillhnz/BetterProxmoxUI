@@ -153,6 +153,7 @@ export async function renderGuestDetail({ page, el, go }, type, vmid, tabParam) 
       sheet.append(h("h2", null, name), h("div", { class: "card pad-0 flat", style: { marginTop: "12px" } }, h("div", { class: "list" },
         item("archive", "Jetzt sichern", "Sofort eine Sicherung erstellen.", () => backupNowSheet([{ vmid: Number(vmid), name }])),
         item("camera", "Snapshot erstellen", "Schneller Sicherungspunkt, z. B. vor einem Update.", () => switchTabExt("sicherungen")),
+        type === "qemu" && state.user.host_admin ? item("box", "In Container umwandeln", "Gleiche Einstellungen, Laufwerke und NAS-Freigaben – braucht weniger Ressourcen.", () => go(`convert/${vmid}`)) : null,
         item("stop", "Hart ausschalten", "Wie Stecker ziehen – nur, wenn die Maschine nicht mehr reagiert.", async () => {
           if (await confirmDialog({ title: "Hart ausschalten?", text: "Wie Stecker ziehen: Nicht gespeicherte Daten in der Maschine können verloren gehen. Nur nutzen, wenn sie nicht mehr reagiert.", confirmText: "Ausschalten", danger: true }))
             powerAction(type, vmid, "stop", name);
