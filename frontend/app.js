@@ -264,8 +264,27 @@ function renderTfa(kinds) {
   setTimeout(() => code.focus(), 50);
 }
 
+// Update-Assistent: Hinweis unten in der Ecke, wenn eine neue Version bereitliegt
+async function checkSelfUpdate() {
+  if (!state.user?.host_admin) return;
+  let info;
+  try { info = (await api("/selfupdate")).data; } catch { return; }
+  if (!info?.available) return;
+  try { if (localStorage.getItem("bpui-update-dismissed") === info.latest) return; } catch { /* egal */ }
+  toast("Update verfügbar", `BetterProxmoxUI ${info.latest} ist da (installiert: ${info.current}).`, "info", {
+    timeout: 0,
+    actions: [
+      { label: "Jetzt aktualisieren", onClick: async () => {
+        try { const res = await api("/jobs", { method: "POST", body: { kind: "selfupdate" } }); location.hash = `#/job/${res.data.id}`; } catch (e) { errorToast(e); }
+      } },
+      { label: "Später", onClick: () => { try { localStorage.setItem("bpui-update-dismissed", info.latest); } catch { /* egal */ } } },
+    ],
+  });
+}
+
 async function afterLogin(user) {
   state.user = user;
+  setTimeout(checkSelfUpdate, 1500);
   try {
     const nodes = await pve("GET", "/nodes");
     state.nodes = (nodes || []).sort((a, b) => a.node.localeCompare(b.node));

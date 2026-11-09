@@ -151,6 +151,10 @@ BPUI_HOST_ADMINS=root@pam
 # Repository für Selbst-Updates
 BPUI_REPO=${REPO}
 BPUI_BRANCH=${BRANCH}
+
+# Push-Nachricht bei neuen Versionen (App „ntfy“, Thema abonnieren), leer = aus
+#BPUI_NTFY_TOPIC=
+#BPUI_NTFY_URL=https://ntfy.sh
 EOF
   chmod 600 "$ENV_FILE"
   ok "Konfiguration: $ENV_FILE"

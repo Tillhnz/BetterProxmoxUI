@@ -58,6 +58,11 @@ PVE_CA = os.environ.get("BPUI_PVE_CA", "/etc/pve/pve-root-ca.pem")
 EXTRA_NETS = [n.strip() for n in os.environ.get("BPUI_ALLOW_NETS", "").split(",") if n.strip()]
 # Auf "0" setzen, um Skripte/Updates/Shell komplett abzuschalten.
 HOST_ACTIONS = os.environ.get("BPUI_HOST_ACTIONS", "1") == "1"
+# Update-Assistent: neue Versionen auf GitHub erkennen und per Push (ntfy) melden
+UPDATE_REPO = os.environ.get("BPUI_REPO", "Tillhnz/BetterProxmoxUI")
+UPDATE_BRANCH = os.environ.get("BPUI_BRANCH", "main")
+NTFY_URL = os.environ.get("BPUI_NTFY_URL", "https://ntfy.sh").rstrip("/")
+NTFY_TOPIC = os.environ.get("BPUI_NTFY_TOPIC", "")  # leer = keine Push-Nachrichten
 # Wer Host-Aktionen ausführen darf (wie bei Proxmox: nur root@pam bekommt die Host-Shell).
 HOST_ADMINS = {u.strip() for u in os.environ.get("BPUI_HOST_ADMINS", "root@pam").split(",") if u.strip()}
 INSTALL_DIR = os.environ.get("BPUI_INSTALL_DIR", "/opt/better-proxmox-ui")
@@ -423,6 +428,60 @@ async def login_tfa(request: Request):
     resp = _finish_login(res.get("data") or {}, pending["username"])
     resp.delete_cookie("bpui_tfa", path="/api/")
     return resp
+
+
+# ---------- Update-Assistent ----------
+
+SELF_UPDATE = {"latest": None, "checked": 0.0}
+NOTIFIED_FILE = Path(os.environ.get("BPUI_STATE_DIR", "/var/lib/better-proxmox-ui")) / "update-notified"
+
+
+def _vtuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4])
+
+
+def _check_latest(max_age: float = 3600) -> str | None:
+    """Version auf GitHub (Datei VERSION im Zweig), höchstens stündlich abgefragt."""
+    if time.time() - SELF_UPDATE["checked"] < max_age:
+        return SELF_UPDATE["latest"]
+    SELF_UPDATE["checked"] = time.time()
+    url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/VERSION"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "BetterProxmoxUI"}), timeout=15) as r:
+            SELF_UPDATE["latest"] = r.read().decode().strip()[:40] or None
+    except Exception:  # noqa: BLE001 - offline: kein Hinweis
+        pass
+    return SELF_UPDATE["latest"]
+
+
+def _update_info(max_age: float = 3600) -> dict:
+    latest = _check_latest(max_age)
+    avail = bool(latest and VERSION != "dev" and _vtuple(latest) > _vtuple(VERSION))
+    return {"current": VERSION, "latest": latest, "available": avail}
+
+
+def _notify_update() -> None:
+    info = _update_info(0)
+    if not (NTFY_TOPIC and info["available"]):
+        return
+    with contextlib.suppress(OSError):
+        if NOTIFIED_FILE.read_text().strip() == info["latest"]:
+            return
+    body = json.dumps({"topic": NTFY_TOPIC, "title": "Update für BetterProxmoxUI verfügbar",
+                       "message": f"Version {info['latest']} ist da (installiert: {VERSION}).\nEinspielen: Updates → Oberfläche aktualisieren.",
+                       "priority": 3, "tags": ["package"]}).encode()
+    req = urllib.request.Request(NTFY_URL, data=body, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15):
+        pass
+    NOTIFIED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    NOTIFIED_FILE.write_text(info["latest"])
+
+
+async def selfupdate_info(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    return JSONResponse({"data": await asyncio.to_thread(_update_info)})
 
 
 async def logout(request: Request):
@@ -1231,10 +1290,15 @@ async def lifespan(app):
             except OSError as e:
                 log.warning("Port %s für die http→https-Weiterleitung ist belegt (%s) – übersprungen.", HTTP_PORT, e)
     async def housekeeping():
+        n = 0
         while True:
             await asyncio.sleep(60)
             with contextlib.suppress(Exception):
                 _prune_jobs()
+            if n % 360 == 5:  # alle 6 Stunden nach neuer Version schauen und per Push melden
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(_notify_update)
+            n += 1
     hk = asyncio.create_task(housekeeping())
     try:
         yield
@@ -2017,6 +2081,7 @@ routes = [
     Route("/api/login/tfa", login_tfa, methods=["POST"]),
     Route("/api/logout", logout, methods=["POST"]),
     Route("/api/me", me),
+    Route("/api/selfupdate", selfupdate_info),
     Route("/api/scripts", scripts_catalog),
     Route("/api/logo/{slug}", logo),
     Route("/api/host/mounts", host_mounts),
