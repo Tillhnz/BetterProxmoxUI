@@ -36,8 +36,28 @@ export async function renderConvert({ el, go }, vmid) {
         `${a.os.name || "Linux"} · ${a.cores} Kerne · ${bytes(a.memory * 1024 ** 2)} RAM · ${a.mode === "agent" ? "gelesen über den Gast-Agenten" : "Festplatte direkt gelesen"}`)),
       a.immich ? h("span", { class: "badge accent" }, "Immich erkannt") : null,
       a.docker ? h("span", { class: "badge" }, "Docker") : null),
-    ...a.blockers.map(b => h("div", { style: { marginBottom: "8px" } }, callout("bad", "Geht so nicht", b))),
+    ...(a.leftovers ? [] : a.blockers).map(b => h("div", { style: { marginBottom: "8px" } }, callout("bad", "Geht so nicht", b))),
     ...a.warnings.map(w => h("div", { style: { marginBottom: "8px" } }, callout("warn", null, w)))));
+  if (a.leftovers) {
+    const lo = a.leftovers;
+    let startVm = true;
+    const items = [
+      lo.processes.length ? "Die Umwandlung läuft im Hintergrund noch (hängt vermutlich) – sie wird beendet." : null,
+      lo.mounts.length || lo.loops.length || lo.nbds.length ? "Die Festplatten der VM sind noch auf dem Server eingehängt – sie werden freigegeben." : null,
+      lo.ct ? `Container ${lo.ct.ctid} ist nur halb angelegt – er wird gelöscht.` : null,
+    ].filter(Boolean);
+    const btn = h("button", { class: "btn primary" }, icon("refresh", "sm"), "Aufräumen");
+    btn.addEventListener("click", () => withBusy(btn, async () => {
+      try { const r = await api(`/convert/${vmid}/cleanup`, { method: "POST", body: { start_vm: startVm } }); go(`job/${r.data.id}`); }
+      catch (e) { errorToast(e); }
+    }));
+    body.append(card("alert", "Reste einer abgebrochenen Umwandlung",
+      h("ul", { class: "plain-list", style: { marginTop: 0 } }, items.map(t => h("li", null, t))),
+      h("p", { class: "muted small" }, "Die VM selbst wird dabei nicht verändert."),
+      a.status !== "running" ? toggle("VM danach wieder starten", "Damit Immich & Co. bis zum nächsten Versuch wieder laufen.", startVm, v => { startVm = v; }) : null,
+      h("div", { class: "row wrap", style: { marginTop: "10px" } }, btn)));
+    return;
+  }
   if (a.blockers.length) return;
 
   // ---------- Plan (vorbelegt wie die VM) ----------
@@ -146,7 +166,7 @@ export async function renderConvert({ el, go }, vmid) {
   startBtn.addEventListener("click", () => withBusy(startBtn, async () => {
     const steps = [a.status === "running" ? "Die VM wird sauber heruntergefahren." : null,
       "Ihre Festplatten werden nur gelesen – die VM selbst bleibt unverändert erhalten.",
-      `Container ${p.ctid} „${p.hostname}“ wird angelegt und gefüllt (je nach Datenmenge Minuten bis Stunden).`,
+      `Container ${p.ctid} „${p.hostname}“ wird angelegt und gefüllt – Fortschritt, Tempo und Restzeit siehst du live.`,
       "Die VM startet danach nicht mehr automatisch. Geht etwas schief, wird sie wieder gestartet."].filter(Boolean);
     if (!await confirmDialog({ title: "Umwandlung starten?", text: steps.join(" "), confirmText: "Starten" })) return;
     const bodyReq = {

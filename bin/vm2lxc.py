@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -26,6 +27,7 @@ OSTYPES = {"debian": "debian", "ubuntu": "ubuntu", "alpine": "alpine", "centos":
            "almalinux": "centos", "fedora": "fedora", "arch": "archlinux", "opensuse-leap": "opensuse",
            "opensuse-tumbleweed": "opensuse", "devuan": "devuan"}
 UID_SHIFT = 100000
+STATE_DIR = os.environ.get("BPUI_STATE_DIR", "/var/lib/better-proxmox-ui")
 TAR_EXCLUDES = ["./proc/*", "./sys/*", "./dev/*", "./run/*", "./tmp/*", "./var/tmp/*", "./boot/*", "lost+found",
                 "./swapfile", "./swap.img", "./var/cache/apt/archives/*.deb", "./var/lib/docker/overlay2",
                 "./var/lib/docker/image", "./var/lib/docker/containers", "./var/lib/docker/buildkit",
@@ -341,12 +343,17 @@ def agent_exec(vmid, *cmd, timeout=60):
 def inspect(vmid):
     cfg = vm_config(vmid)
     status = vm_status(vmid)
+    lo = leftovers(vmid)
     res = {"vmid": int(vmid), "name": cfg.get("name") or f"vm{vmid}", "status": status, "mode": None,
            "cores": int(cfg.get("cores", 1)) * int(cfg.get("sockets", 1)), "memory": int(cfg.get("memory", 2048)),
            "onboot": str(cfg.get("onboot", "0")) == "1", "tags": cfg.get("tags", ""), "nics": vm_nics(cfg), "disks": vm_disks(cfg),
            "os": {}, "ostype": None, "mounts": [], "root": None, "compose": [], "docker": False, "snap_docker": False,
            "ips": {}, "gateway": host_gateway(), "warnings": [], "blockers": [], "immich": False,
-           "dri": os.path.exists("/dev/dri/renderD128"), "host_mounts": host_net_mounts()}
+           "dri": os.path.exists("/dev/dri/renderD128"), "host_mounts": host_net_mounts(),
+           "leftovers": lo if has_leftovers(lo) else None}
+    if res["leftovers"]:
+        res["blockers"].append("Von einer früheren, abgebrochenen Umwandlung sind noch Reste da. Bitte zuerst aufräumen.")
+        return res
     if cfg.get("ostype", "l26") not in ("l26", "l24", "other"):
         res["blockers"].append("Das ist keine Linux-VM – nur Linux lässt sich in einen Container umwandeln.")
         return res
@@ -551,13 +558,268 @@ def fix_guest_files(ctroot, plan, ostype):
         shift_chown(str(ifs))
 
 
+# ----------------------------------------------------------------------------- Reste einer abgebrochenen Umwandlung
+class Aborted(Exception):
+    pass
+
+
+def _on_signal(signum, _frame):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise Aborted("Abgebrochen.")
+
+
+def _vm_disk_paths(vmid):
+    paths = []
+    with contextlib.suppress(Exception):
+        for d in vm_disks(vm_config(vmid)):
+            r = sh(["pvesm", "path", d["volid"]])
+            if r.returncode == 0 and r.stdout.strip():
+                paths.append(os.path.realpath(r.stdout.strip()))
+    return paths
+
+
+def _plan_ctid(vmid):
+    with contextlib.suppress(Exception):
+        return str(json.loads(Path(f"{STATE_DIR}/convert-{vmid}.json").read_text())["ctid"])
+    return None
+
+
+def _partial_ct(vmid, ctid):
+    """Container aus einer abgebrochenen Umwandlung dieser VM (nur dann wird er angefasst)."""
+    if not ctid:
+        return None
+    conf = Path(f"/etc/pve/lxc/{ctid}.conf")
+    if not conf.exists():
+        return None
+    text = conf.read_text(errors="replace")
+    locked = bool(re.search(r"^lock:\s*create", text, re.M))
+    # Nummer stammt aus unserem Plan und war beim Start frei → mit Sperre „create“ oder unserer Beschreibung ist er von uns
+    if not locked and f"Aus VM {vmid} " not in text.replace("%20", " "):
+        return None
+    return {"ctid": ctid, "locked_create": locked,
+            "running": "running" in sh(["pct", "status", ctid]).stdout}
+
+
+def leftovers(vmid):
+    vmid = str(vmid)
+    res = {"processes": [], "mounts": [], "loops": [], "nbds": [], "ct": None}
+    me = os.getpid()
+    for pid in sh(["pgrep", "-f", f"vm2lxc.py convert .*convert-{vmid}.json"]).stdout.split():
+        if pid.isdigit() and int(pid) != me:
+            res["processes"].append(int(pid))
+    with contextlib.suppress(OSError):
+        for line in open("/proc/self/mounts"):
+            t = line.split()[1].replace("\\040", " ")
+            if f"/bpui-vm{vmid}-" in t:
+                res["mounts"].append(t)
+    paths = set(_vm_disk_paths(vmid))
+    with contextlib.suppress(Exception):
+        for dev in json.loads(sh(["losetup", "-J"]).stdout or "{}").get("loopdevices", []):
+            if dev.get("back-file") and os.path.realpath(dev["back-file"].replace(" (deleted)", "")) in paths:
+                res["loops"].append(dev["name"])
+    for pidf in Path("/sys/block").glob("nbd*/pid"):
+        with contextlib.suppress(Exception):
+            cmd = Path(f"/proc/{pidf.read_text().strip()}/cmdline").read_bytes().decode(errors="replace")
+            if any(p in cmd for p in paths):
+                res["nbds"].append("/dev/" + pidf.parent.name)
+    res["ct"] = _partial_ct(vmid, _plan_ctid(vmid))
+    return res
+
+
+def has_leftovers(lo):
+    return any(lo[k] for k in ("processes", "mounts", "loops", "nbds")) or bool(lo["ct"] and (lo["ct"]["locked_create"]))
+
+
+def cleanup(vmid, start_vm=True, destroy_ct=True):
+    vmid = str(vmid)
+    say("Reste der abgebrochenen Umwandlung aufräumen")
+    lo = leftovers(vmid)
+    for pid in lo["processes"]:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            if not Path(f"/proc/{pid}").exists():
+                break
+            time.sleep(1)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        ok(f"Hängende Umwandlung (Prozess {pid}) beendet")
+    for p in ("tar -C /tmp/bpui-vm" + vmid, f"pct create {lo['ct']['ctid']} -" if lo["ct"] else None):
+        if p:
+            sh(["pkill", "-9", "-f", p])
+    time.sleep(1)
+    lo = leftovers(vmid)
+    for t in sorted(lo["mounts"], key=len, reverse=True):
+        if sh(["umount", t]).returncode != 0:
+            sh(["umount", "-l", t])
+    for base in Path("/tmp").glob(f"bpui-vm{vmid}-*"):
+        shutil.rmtree(base, ignore_errors=True)
+    if lo["mounts"]:
+        ok(f"{len(lo['mounts'])} Einhängepunkt(e) gelöst")
+    host_vgs = set()
+    devs = []
+    for d in lo["loops"] + lo["nbds"]:
+        name = os.path.basename(d)
+        devs += [d] + ["/dev/" + x.name for x in Path(f"/sys/block/{name}").glob(f"{name}p*")]
+    if devs:
+        for line in sh(["pvs", "--noheadings", "-o", "vg_name", "--devices", ",".join(devs)]).stdout.split():
+            host_vgs.add(line)
+        for vg in host_vgs:
+            sh(["vgchange", "-an", vg])
+    for d in lo["nbds"]:
+        sh(["qemu-nbd", "-d", d])
+    for d in lo["loops"]:
+        sh(["losetup", "-d", d])
+    if lo["loops"] or lo["nbds"]:
+        ok("VM-Festplatten wieder freigegeben")
+    ct = lo["ct"]
+    if ct and destroy_ct:
+        cid = ct["ctid"]
+        sh(["pct", "stop", cid])
+        sh(["pct", "unlock", cid])
+        r = sh(["pct", "destroy", cid, "--purge"])
+        if r.returncode == 0:
+            ok(f"Halb fertigen Container {cid} gelöscht")
+        else:
+            warn(f"Container {cid} ließ sich nicht löschen: {r.stderr.strip()[-200:]}")
+        free_orphan_volumes(cid)
+    if start_vm and vm_status(vmid) != "running":
+        print("Die VM wird wieder gestartet …", flush=True)
+        r = sh(["qm", "start", vmid])
+        (ok if r.returncode == 0 else warn)("VM läuft wieder" if r.returncode == 0 else f"VM startet nicht: {r.stderr.strip()[-200:]}")
+    print("\n\033[1;32m✔ Aufgeräumt.\033[0m Du kannst die Umwandlung jetzt erneut starten.", flush=True)
+    return 0
+
+
+def free_orphan_volumes(ctid):
+    """Laufwerke eines abgebrochenen „pct create“, zu denen es keinen Container mehr gibt."""
+    if Path(f"/etc/pve/lxc/{ctid}.conf").exists() or Path(f"/etc/pve/qemu-server/{ctid}.conf").exists():
+        return
+    for line in sh(["pvesm", "status", "--content", "rootdir"]).stdout.splitlines()[1:]:
+        store = line.split()[0] if line.split() else None
+        if not store:
+            continue
+        for vline in sh(["pvesm", "list", store, "--vmid", str(ctid), "--content", "rootdir"]).stdout.splitlines()[1:]:
+            volid = vline.split()[0] if vline.split() else ""
+            # nur Container-Laufwerke (vm-/subvol-<id>-disk-N), niemals Sicherungen o. Ä.
+            if not re.fullmatch(rf"[\w.-]+:(?:[\w.-]+/)?(?:vm|subvol)-{ctid}-disk-\d+(?:\.raw)?", volid):
+                continue
+            if sh(["pvesm", "free", volid]).returncode == 0:
+                ok(f"Übrig gebliebenes Laufwerk {volid} gelöscht")
+
+
+# ----------------------------------------------------------------------------- Kopieren
+STALL_LIMIT = 15 * 60   # so lange darf nichts vorangehen, dann wird abgebrochen
+CHILDREN: list[subprocess.Popen] = []
+
+
+def _drain(stream, sink, prefix):
+    """Liest eine Ausgabe laufend mit – sonst läuft ihr Puffer voll und alles bleibt stehen."""
+    for raw in iter(stream.readline, b""):
+        line = raw.decode(errors="replace").rstrip()
+        if not line:
+            continue
+        sink.append(line)
+        if len(sink) > 400:
+            del sink[:200]
+        sink_count = sink_counts.setdefault(prefix, [0])
+        sink_count[0] += 1
+        if sink_count[0] <= 15:
+            print(f"\r\033[K  {prefix}: {line[:200]}", flush=True)
+        elif sink_count[0] == 16:
+            print(f"\r\033[K  {prefix}: … weitere Meldungen werden nur noch gezählt", flush=True)
+
+
+sink_counts: dict[str, list[int]] = {}
+
+
+def copy_into_container(root, excludes, create_args, total):
+    """tar (liest die VM) → pct create (schreibt den Container) – mit Fortschritt, ohne Zwischenarchiv."""
+    import threading
+    tar = subprocess.Popen(["tar", "-C", root, "--numeric-owner", "--xattrs", "--xattrs-include=user.*",
+                            "--xattrs-include=security.capability", "--acls", "--sparse",
+                            "--warning=no-file-ignored", "--warning=no-file-changed",
+                            *[f"--exclude={e}" for e in excludes], "-cpf", "-", "."],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    pct = subprocess.Popen(create_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    CHILDREN[:] = [tar, pct]
+    tar_err, pct_out = [], []
+    threads = [threading.Thread(target=_drain, args=(tar.stderr, tar_err, "lesen"), daemon=True),
+               threading.Thread(target=_drain, args=(pct.stdout, pct_out, "schreiben"), daemon=True)]
+    for t in threads:
+        t.start()
+    state = {"copied": 0, "moved": time.time(), "done": False}
+
+    def pump():
+        try:
+            while True:
+                chunk = tar.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                pct.stdin.write(chunk)
+                state["copied"] += len(chunk)
+                state["moved"] = time.time()
+        except (BrokenPipeError, ValueError, OSError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                pct.stdin.close()
+            state["done"] = True
+
+    pt = threading.Thread(target=pump, daemon=True)
+    pt.start()
+    t0, last_print = time.time(), 0.0
+    while not state["done"] or pct.poll() is None:
+        time.sleep(1)
+        now = time.time()
+        if pct.poll() is not None and not state["done"]:
+            tar.kill()            # pct ist fertig/abgestürzt → Lesen beenden
+        if now - state["moved"] > STALL_LIMIT and pct.poll() is None:
+            tar.kill()
+            pct.kill()
+            pct.wait()
+            raise RuntimeError(f"Seit {STALL_LIMIT // 60} Minuten geht nichts mehr voran – abgebrochen. "
+                               "Letzte Meldungen siehe oben.")
+        if now - last_print >= 5:
+            last_print = now
+            c = state["copied"]
+            rate = c / max(1, now - t0)
+            line = f"  kopiert: {gb(c)}"
+            if total:
+                line += f" von ca. {gb(total)} ({min(99, int(c * 100 / total))} %)"
+            line += f" · {rate / 1024**2:.0f} MB/s"
+            if total and rate > 0 and c < total:
+                line += f" · noch ca. {fmt_dur((total - c) / rate)}"
+            if state["done"]:
+                line = f"  alles gelesen ({gb(c)}) – Container wird fertig angelegt …"
+            print(f"\r\033[K{line}", end="", flush=True)
+    tar.wait()
+    for t in threads:
+        t.join(timeout=5)
+    CHILDREN.clear()
+    print(f"\r\033[K  kopiert: {gb(state['copied'])} in {fmt_dur(time.time() - t0)}", flush=True)
+    return state["copied"], pct.returncode, tar.returncode, pct_out
+
+
+def fmt_dur(sec):
+    sec = int(sec)
+    if sec < 90:
+        return f"{sec} s"
+    if sec < 5400:
+        return f"{sec // 60} min"
+    return f"{sec // 3600} h {sec % 3600 // 60} min"
+
+
 def convert(plan_path):
     plan = json.loads(Path(plan_path).read_text())
     vmid, ctid = str(plan["vmid"]), str(plan["ctid"])
     cfg = vm_config(vmid)
     was_running = vm_status(vmid) == "running"
     dm = DiskMounter(vmid, cfg)
-    created = False
+    created = complete = False
+    signal.signal(signal.SIGHUP, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
     try:
         say("1/7  Vorbereitung prüfen")
         if Path(f"/etc/pve/lxc/{ctid}.conf").exists() or Path(f"/etc/pve/qemu-server/{ctid}.conf").exists():
@@ -625,37 +887,14 @@ def convert(plan_path):
             args += [f"--net{i}", net]
         total = sum((m.get("used") or 0) for m in plan.get("mounts", []) if m["kind"] == "disk" and m.get("action") != "skip") \
             + (plan.get("root_used") or 0)
-        tar = subprocess.Popen(["tar", "-C", dm.root, "--numeric-owner", "--xattrs", "--xattrs-include=user.*",
-                                "--xattrs-include=security.capability", "--acls", "--sparse", "--warning=no-file-ignored",
-                                *[f"--exclude={e}" for e in excludes], "-cpf", "-", "."],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        pct = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         created = True
-        copied, last = 0, 0.0
-        try:
-            while True:
-                chunk = tar.stdout.read(4 * 1024 * 1024)
-                if not chunk:
-                    break
-                pct.stdin.write(chunk)
-                copied += len(chunk)
-                if time.time() - last > 3:
-                    last = time.time()
-                    pct_txt = f" (~{min(99, int(copied * 100 / total))} %)" if total else ""
-                    print(f"\r  kopiert: {gb(copied)}{pct_txt}      ", end="", flush=True)
-        except BrokenPipeError:
-            pass
-        with contextlib.suppress(BrokenPipeError):
-            pct.stdin.close()
-        tar.wait()
-        out = pct.stdout.read().decode(errors="replace")
-        pct.wait()
-        print(f"\r  kopiert: {gb(copied)}                ", flush=True)
-        if pct.returncode != 0:
-            print(out[-2000:])
+        copied, rc_pct, rc_tar, out = copy_into_container(dm.root, excludes, args, total)
+        if rc_pct != 0:
+            print("\n".join(out[-25:]))
             raise RuntimeError("Der Container konnte nicht angelegt werden (siehe oben).")
-        if tar.returncode not in (0, 1):
-            warn("tar meldete Fehler: " + tar.stderr.read().decode(errors="replace")[-500:])
+        if rc_tar not in (0, 1):
+            warn(f"Beim Lesen der VM-Festplatte gab es Fehler (tar {rc_tar}) – Details stehen oben.")
+        complete = True
         ok(f"Container {ctid} angelegt, {gb(copied)} kopiert")
 
         say("5/7  System an den Container anpassen")
@@ -731,14 +970,28 @@ def convert(plan_path):
         print(f"\n\033[1;32m✔ Fertig.\033[0m Container {ctid} läuft{(' unter ' + ip[0]) if ip else ''}. "
               f"Die VM {vmid} ist aus und bleibt als Rückfallebene erhalten – wenn alles passt, kannst du sie später löschen.", flush=True)
         return 0
-    except Exception as e:  # noqa: BLE001
+    except (Exception, Aborted) as e:  # noqa: BLE001
         print(f"\n\033[1;31m✘ {e}\033[0m", flush=True)
-        if created and Path(f"/etc/pve/lxc/{ctid}.conf").exists():
+        # pct create sauber beenden lassen (räumt seine Laufwerke dann selbst auf), tar sofort
+        for c in CHILDREN:
+            with contextlib.suppress(Exception):
+                c.terminate()
+        for c in CHILDREN:
+            with contextlib.suppress(Exception):
+                c.wait(timeout=45)
+            with contextlib.suppress(Exception):
+                c.kill()
+        dm.cleanup()  # erst aushängen, dann aufräumen und die VM wieder starten
+        if created and not complete:
+            # Mitten im Kopieren abgebrochen → der Container ist unbrauchbar
+            if _partial_ct(vmid, ctid):
+                sh(["pct", "unlock", ctid])
+                if sh(["pct", "destroy", ctid, "--purge"]).returncode == 0:
+                    print(f"Der halb fertige Container {ctid} wurde wieder gelöscht.")
+            free_orphan_volumes(ctid)
+        elif created and Path(f"/etc/pve/lxc/{ctid}.conf").exists():
             sh(["pct", "stop", ctid])
-            print(f"Der halb fertige Container {ctid} bleibt ausgeschaltet zum Nachsehen – du kannst ihn löschen.")
-        elif created:
-            print("Es wurde kein Container angelegt.")
-        dm.cleanup()  # erst aushängen, dann die VM wieder starten
+            print(f"Container {ctid} ist angelegt, aber nicht fertig eingerichtet – er bleibt ausgeschaltet zum Nachsehen.")
         if was_running and vm_status(vmid) != "running":
             print("Die VM wird wieder gestartet …", flush=True)
             sh(["qm", "start", vmid])
@@ -753,6 +1006,8 @@ def main():
         return 0
     if len(sys.argv) == 3 and sys.argv[1] == "convert":
         return convert(sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == "cleanup" and sys.argv[2].isdigit():
+        return cleanup(sys.argv[2], start_vm=sys.argv[3] == "1")
     print(__doc__)
     return 2
 

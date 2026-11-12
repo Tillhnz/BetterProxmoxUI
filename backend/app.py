@@ -921,6 +921,7 @@ class Job:
         self.buffer = bytearray()
         self.clients: set[asyncio.Queue] = set()
         self.killing = False
+        self.kill_grace = 6                 # Sekunden bis SIGKILL beim Abbrechen
         self.back: str | None = None        # wohin „Zurück“ auf der Aufgabenseite führt
         self.back_label: str | None = None
         self.idle_since = time.time()   # seit wann niemand mehr zuschaut
@@ -1034,8 +1035,8 @@ class Job:
         self.killing = True
         self._signal_all(signal.SIGHUP)
         self._signal_all(signal.SIGCONT)   # angehaltene Befehle (Strg+Z) sollen das Signal auch erhalten
-        self.loop.call_later(3, lambda: self.running and self._signal_all(signal.SIGTERM))
-        self.loop.call_later(6, lambda: self.running and self._signal_all(signal.SIGKILL))
+        self.loop.call_later(self.kill_grace / 2, lambda: self.running and self._signal_all(signal.SIGTERM))
+        self.loop.call_later(self.kill_grace, lambda: self.running and self._signal_all(signal.SIGKILL))
 
 
 JOBS: dict[str, Job] = {}
@@ -1937,9 +1938,28 @@ async def convert_start(request: Request):
     plan_path.write_text(json.dumps(plan))
     os.chmod(plan_path, 0o600)
     job = Job(f"{insp.get('name') or vmid} in Container umwandeln", "convert", ["python3", VM2LXC_SCRIPT, "convert", str(plan_path)], s.username)
-    job.back, job.back_label = "#/guests", "Maschinen"
+    job.back, job.back_label = f"#/convert/{vmid}", "Umwandlung"
+    job.kill_grace = 150   # Zeit zum Aufräumen (Aushängen, halben Container löschen, VM starten)
     JOBS[job.id] = job
     CONVERT_INSPECT.pop(vmid, None)
+    return JSONResponse({"data": job.info()})
+
+
+async def convert_cleanup(request: Request):
+    s, err = await _convert_admin(request)
+    if err:
+        return err
+    vmid = request.path_params["vmid"]
+    if not vmid.isdigit() or not Path(f"/etc/pve/qemu-server/{vmid}.conf").exists():
+        return _err(404, "VM nicht gefunden")
+    if any(j.running and j.kind == "convert" for j in JOBS.values()):
+        return _err(409, "Es läuft gerade noch eine Umwandlung – bitte erst dort abbrechen.")
+    b = await request.json()
+    job = Job("Abgebrochene Umwandlung aufräumen", "convert",
+              ["python3", VM2LXC_SCRIPT, "cleanup", vmid, "1" if b.get("start_vm", True) else "0"], s.username)
+    job.back, job.back_label = f"#/convert/{vmid}", "Umwandlung"
+    job.kill_grace = 150
+    JOBS[job.id] = job
     return JSONResponse({"data": job.info()})
 
 
@@ -2215,6 +2235,7 @@ routes = [
     Route("/api/open-pve", open_pve),
     Route("/api/convert/{vmid}", convert_inspect),
     Route("/api/convert/{vmid}", convert_start, methods=["POST"]),
+    Route("/api/convert/{vmid}/cleanup", convert_cleanup, methods=["POST"]),
     Route("/api/audio", audio_info),
     Route("/api/audio/setup", audio_setup, methods=["POST"]),
     Route("/api/audio/{action}", audio_action, methods=["POST"]),
