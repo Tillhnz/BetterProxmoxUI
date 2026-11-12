@@ -525,7 +525,33 @@ def nas_host_mount(item, guest_root, ctid):
     else:
         warn(f"{item['source']} ließ sich auf dem Server nicht einhängen ({r.stderr.strip()[-200:]}). "
              f"Eintrag steht in /etc/fstab – bitte unter „Speicher & NAS“ prüfen.")
+    if item["fstype"].startswith("nfs"):
+        return nfs_ct_layer(target, ctid, item["target"])
     return target
+
+
+def nfs_ct_layer(nfs_path, ctid, label):
+    """NFS kennt keine uid=-Option. Damit der unprivilegierte Container (root = 100000) wie früher die VM
+    (root) schreiben kann, legt bindfs eine Schicht darüber: Der Container sieht alles als seins, geschrieben
+    wird vom Server als root – genau wie vorher aus der VM."""
+    if not shutil.which("bindfs"):
+        print("Installiere bindfs …", flush=True)
+        r = sh(["apt-get", "install", "-y", "-q", "bindfs"], timeout=300)
+        if r.returncode != 0:
+            warn("bindfs ließ sich nicht installieren – der Container bekommt die NFS-Freigabe direkt (evtl. ohne Schreibrecht).")
+            return nfs_path
+    layer = nfs_path.rstrip("/") + "-ct"
+    os.makedirs(layer, exist_ok=True)
+    opts = (f"force-user={UID_SHIFT},force-group={UID_SHIFT},perms=u+rwX,allow_other,"
+            f"x-systemd.requires-mounts-for={nfs_path},nofail")
+    with open("/etc/fstab", "a") as fh:
+        fh.write(f"# Proxmox Zentrale: Schreibzugriff für Container {ctid} ({label})\n{nfs_path} {layer} fuse.bindfs {opts} 0 0\n")
+    sh(["systemctl", "daemon-reload"])
+    if sh(["mount", layer], timeout=60).returncode == 0:
+        ok(f"Zugriffs-Schicht für den Container unter {layer} eingerichtet")
+    else:
+        warn(f"bindfs-Schicht {layer} ließ sich nicht einhängen.")
+    return layer
 
 
 def fix_guest_files(ctroot, plan, ostype):
@@ -956,8 +982,8 @@ def convert(plan_path):
             if r.returncode == 0:
                 ok(f"NAS-Ordner {t}: lesen und schreiben klappt")
             elif m.get("fstype", "").startswith("nfs"):
-                warn(f"NAS-Ordner {t}: kein Zugriff. Bei NFS sieht die NAS den Container als Benutzer 100000 statt root. "
-                     "Abhilfe auf der NAS: in der NFS-Freigabe „Squash: Alle Benutzer zu admin zuordnen“ (Synology) bzw. all_squash mit passender anonuid.")
+                warn(f"NAS-Ordner {t}: kein Schreibzugriff. Prüfe auf der NAS, ob der Proxmox-Server in der NFS-Regel steht "
+                     "und „Squash: Keine Zuordnung“ (no_root_squash) eingestellt ist – so wie es die VM gebraucht hat.")
             else:
                 warn(f"NAS-Ordner {t}: kein Zugriff ({(r.stderr or r.stdout).strip()[-160:]}). Rechte der Freigabe prüfen.")
         compose = plan.get("compose") or []
