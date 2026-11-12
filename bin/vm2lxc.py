@@ -947,6 +947,19 @@ def convert(plan_path):
             if sh(["pct", "exec", ctid, "--", "sh", "-c", "getent hosts github.com >/dev/null || getent hosts deb.debian.org >/dev/null"]).returncode == 0:
                 break
             time.sleep(2)
+        # NAS-Ordner: kann der Container dort schreiben? (unprivilegierte Container greifen mit verschobenen IDs zu)
+        for m in plan.get("mounts", []):
+            if m["kind"] != "nas" or m.get("action") == "skip":
+                continue
+            t = m["target"]
+            r = sh(["pct", "exec", ctid, "--", "sh", "-c", f"ls '{t}' >/dev/null && touch '{t}/.bpui-schreibtest' && rm -f '{t}/.bpui-schreibtest'"], timeout=60)
+            if r.returncode == 0:
+                ok(f"NAS-Ordner {t}: lesen und schreiben klappt")
+            elif m.get("fstype", "").startswith("nfs"):
+                warn(f"NAS-Ordner {t}: kein Zugriff. Bei NFS sieht die NAS den Container als Benutzer 100000 statt root. "
+                     "Abhilfe auf der NAS: in der NFS-Freigabe „Squash: Alle Benutzer zu admin zuordnen“ (Synology) bzw. all_squash mit passender anonuid.")
+            else:
+                warn(f"NAS-Ordner {t}: kein Zugriff ({(r.stderr or r.stdout).strip()[-160:]}). Rechte der Freigabe prüfen.")
         compose = plan.get("compose") or []
         if compose:
             print("Warte auf Docker …", flush=True)

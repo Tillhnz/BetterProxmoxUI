@@ -122,8 +122,9 @@ export async function renderConvert({ el, go }, vmid) {
         const info = h("div", { class: "muted small" });
         const upd = () => {
           hpField.classList.toggle("hidden", c.action !== "bind");
-          info.textContent = c.action === "mount" ? `Der Server hängt ${m.source} mit den Zugangsdaten aus der VM unter /mnt/bpui/… ein (Eintrag in /etc/fstab).`
-            : c.action === "skip" ? "Wird nicht übernommen – du kannst den Ordner später unter Einstellungen → Ordner hinzufügen." : "";
+          info.textContent = (c.action === "mount" ? `Der Server hängt ${m.source} mit den Zugangsdaten aus der VM unter /mnt/bpui/… ein (Eintrag in /etc/fstab).`
+            : c.action === "skip" ? "Wird nicht übernommen – du kannst den Ordner später unter Einstellungen → Ordner hinzufügen." : "")
+            + (c.action !== "skip" && m.fstype.startsWith("nfs") ? " Wichtig bei NFS: Der Container greift als Benutzer 100000 zu, nicht als root. Damit er schreiben darf, auf der NAS in der NFS-Regel „Squash: Alle Benutzer zu admin zuordnen“ einstellen (Synology)." : "");
         };
         upd();
         return h("div", { class: "howto" }, h("div", { class: "guest-icon" }, icon("network")),
