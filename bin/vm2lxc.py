@@ -542,15 +542,33 @@ def nfs_ct_layer(nfs_path, ctid, label):
             return nfs_path
     layer = nfs_path.rstrip("/") + "-ct"
     os.makedirs(layer, exist_ok=True)
-    opts = (f"force-user={UID_SHIFT},force-group={UID_SHIFT},perms=u+rwX,allow_other,"
-            f"x-systemd.requires-mounts-for={nfs_path},nofail")
-    with open("/etc/fstab", "a") as fh:
-        fh.write(f"# Proxmox Zentrale: Schreibzugriff für Container {ctid} ({label})\n{nfs_path} {layer} fuse.bindfs {opts} 0 0\n")
+    # Als eigener Dienst statt fstab: ältere bindfs-Versionen kennen „nofail“ nicht, und ein Fehler
+    # darf den Start des Servers nie blockieren. Startet vor den Containern (pve-guests).
+    unit = "bpui-bindfs-" + re.sub(r"[^a-z0-9]+", "-", layer.lower()).strip("-") + ".service"
+    Path(f"/etc/systemd/system/{unit}").write_text(f"""[Unit]
+Description=Proxmox Zentrale: Schreibzugriff für Container {ctid} ({label}) über bindfs
+RequiresMountsFor={nfs_path}
+After=network-online.target remote-fs.target
+Before=pve-guests.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p {layer}
+ExecStart=/usr/bin/bindfs -f --force-user={UID_SHIFT} --force-group={UID_SHIFT} --perms=u+rwX -o allow_other {nfs_path} {layer}
+ExecStopPost=-/bin/umount -l {layer}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+""")
     sh(["systemctl", "daemon-reload"])
-    if sh(["mount", layer], timeout=60).returncode == 0:
-        ok(f"Zugriffs-Schicht für den Container unter {layer} eingerichtet")
+    sh(["systemctl", "enable", "--now", unit])
+    time.sleep(2)
+    if os.path.ismount(layer):
+        ok(f"Zugriffs-Schicht für den Container unter {layer} eingerichtet ({unit})")
     else:
-        warn(f"bindfs-Schicht {layer} ließ sich nicht einhängen.")
+        warn(f"bindfs-Schicht {layer} läuft nicht – siehe „systemctl status {unit}“.")
     return layer
 
 
