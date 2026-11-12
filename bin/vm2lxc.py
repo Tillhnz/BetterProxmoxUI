@@ -794,6 +794,9 @@ def copy_into_container(root, excludes, create_args, total):
             if state["done"]:
                 line = f"  alles gelesen ({gb(c)}) – Container wird fertig angelegt …"
             print(f"\r\033[K{line}", end="", flush=True)
+    # Ist „pct create“ vorzeitig beendet, liest niemand mehr – tar sonst ewig blockiert
+    if tar.poll() is None:
+        tar.kill()
     tar.wait()
     for t in threads:
         t.join(timeout=5)
@@ -853,7 +856,8 @@ def convert(plan_path):
 
         say("4/7  Container anlegen und Daten kopieren")
         storage = plan["storage"]
-        args = ["pct", "create", ctid, "-", "--hostname", plan["hostname"], "--ostype", ostype,
+        # Aus einem Datenstrom („-“) kann Proxmox nur im Wiederherstellungs-Modus anlegen
+        args = ["pct", "create", ctid, "-", "--restore", "1", "--hostname", plan["hostname"], "--ostype", ostype,
                 "--unprivileged", "1", "--features", "nesting=1,keyctl=1", "--cores", str(plan["cores"]),
                 "--memory", str(plan["memory"]), "--swap", str(plan.get("swap", 512)),
                 "--rootfs", f"{storage}:{plan['rootfs_gb']}", "--onboot", "1" if plan.get("onboot") else "0",
