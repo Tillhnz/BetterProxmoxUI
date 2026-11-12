@@ -961,16 +961,25 @@ def convert(plan_path):
                 print(f"\n\033[1;34m$ docker compose -f {f} up -d\033[0m  (lädt die Images neu – kann dauern)", flush=True)
                 rc = subprocess.call(["pct", "exec", ctid, "--", "docker", "compose", "-f", f, "up", "-d"])
                 (ok if rc == 0 else warn)(f"{f}: {'läuft' if rc == 0 else 'Fehler – bitte im Container prüfen'}")
-        ip = sh(["pct", "exec", ctid, "--", "hostname", "-I"]).stdout.split()
+        ip = [x for x in sh(["pct", "exec", ctid, "--", "hostname", "-I"], timeout=20).stdout.split()
+              if not x.startswith(("172.17.", "172.18.", "172.19.", "172.2", "fd", "fe80"))]
+        if ip:
+            print(f"\nAdresse des Containers: \033[1m{ip[0]}\033[0m", flush=True)
         if plan.get("immich") and ip:
-            time.sleep(5)
-            for _ in range(20):
-                if sh(["pct", "exec", ctid, "--", "sh", "-c", "wget -qO- http://127.0.0.1:2283/api/server/ping 2>/dev/null || curl -fs http://127.0.0.1:2283/api/server/ping"]).returncode == 0:
+            print(f"Warte, bis Immich antwortet (höchstens 3 Minuten) …", flush=True)
+            # wget/curl mit kurzer Zeitgrenze – sonst wartet wget bei halb gestartetem Server sehr lange
+            probe = ("for u in /api/server/ping /api/server-info/ping; do "
+                     "wget -q -T 5 -t 1 -O- http://127.0.0.1:2283$u >/dev/null 2>&1 && exit 0; "
+                     "curl -fs -m 5 http://127.0.0.1:2283$u >/dev/null 2>&1 && exit 0; done; exit 1")
+            for i in range(30):
+                if sh(["pct", "exec", ctid, "--", "sh", "-c", probe], timeout=30).returncode == 0:
                     ok(f"Immich antwortet: http://{ip[0]}:2283")
                     break
+                print(f"\r  noch nicht bereit … ({(i + 1) * 6} s)", end="", flush=True)
                 time.sleep(6)
             else:
-                warn("Immich antwortet noch nicht – beim ersten Start dauert es oft ein paar Minuten.")
+                print()
+                warn(f"Immich antwortet noch nicht – beim ersten Start dauert es oft ein paar Minuten. Später einfach http://{ip[0]}:2283 öffnen.")
         print(f"\n\033[1;32m✔ Fertig.\033[0m Container {ctid} läuft{(' unter ' + ip[0]) if ip else ''}. "
               f"Die VM {vmid} ist aus und bleibt als Rückfallebene erhalten – wenn alles passt, kannst du sie später löschen.", flush=True)
         return 0
