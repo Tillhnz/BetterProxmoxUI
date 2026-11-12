@@ -980,6 +980,13 @@ def convert(plan_path):
             else:
                 print()
                 warn(f"Immich antwortet noch nicht – beim ersten Start dauert es oft ein paar Minuten. Später einfach http://{ip[0]}:2283 öffnen.")
+                # Hilfe zur Fehlersuche gleich mitliefern
+                print("\nStatus der Docker-Container:", flush=True)
+                print(sh(["pct", "exec", ctid, "--", "docker", "ps", "-a", "--format", "  {{.Names}}: {{.Status}}"], timeout=30).stdout, flush=True)
+                logs = sh(["pct", "exec", ctid, "--", "docker", "logs", "--tail", "30", "immich_server"], timeout=30)
+                if logs.stdout or logs.stderr:
+                    print("Letzte Meldungen von immich_server:", flush=True)
+                    print(((logs.stdout or "") + (logs.stderr or ""))[-4000:], flush=True)
         print(f"\n\033[1;32m✔ Fertig.\033[0m Container {ctid} läuft{(' unter ' + ip[0]) if ip else ''}. "
               f"Die VM {vmid} ist aus und bleibt als Rückfallebene erhalten – wenn alles passt, kannst du sie später löschen.", flush=True)
         return 0
