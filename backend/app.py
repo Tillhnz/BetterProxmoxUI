@@ -1735,7 +1735,8 @@ KNOWN_APPS = [("immich-server", "Immich", "immich"), ("paperless-ngx", "Paperles
               ("frigate", "Frigate", "frigate"), ("gitea", "Gitea", "gitea"), ("mealie", "Mealie", "mealie")]
 APP_NOTES = {"Immich": "Immich bringt oft große Neuerungen. Vor einem Sprung über mehrere Versionen kurz die Release-Notes lesen – manchmal muss die docker-compose.yml angepasst werden.",
              "Paperless-ngx": "Vor großen Versionssprüngen kurz die Release-Notes lesen."}
-UPDATE_APPS: dict[str, list[str]] = {}   # zuletzt erkannte Compose-Dateien je Maschine (nur diese dürfen aktualisiert werden)
+UPDATE_APPS: dict[str, list[str]] = {}
+UPDATE_APP_INFO: dict[str, list[dict]] = {}   # zuletzt erkannte Compose-Dateien je Maschine (nur diese dürfen aktualisiert werden)
 
 
 def _parse_apps(out: str) -> list[dict]:
@@ -1825,6 +1826,7 @@ async def guest_update_info(request: Request):
                 info["os_name"] = d.get("pretty-name") or d.get("name")
     info["command"] = UPDATE_COMMANDS.get(info["family"] or "")
     UPDATE_APPS[f"{gtype}/{vmid}"] = [a["id"] for a in info["apps"]]
+    UPDATE_APP_INFO[f"{gtype}/{vmid}"] = info["apps"]
     with contextlib.suppress(Exception):
         node = socket.gethostname()
         _, res = await pve_call("GET", f"/nodes/{node}/{gtype}/{vmid}/feature", s.ticket, s.csrf, query="feature=snapshot")
@@ -1860,9 +1862,19 @@ async def guest_update_start(request: Request):
     if sum(1 for j in JOBS.values() if j.running and j.kind != "shell") >= MAX_RUNNING:
         return _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig. Bitte warten, bis eine fertig ist.")
     name = str(body.get("name") or f"#{vmid}")[:60]
+    boost = []
+    if gtype == "lxc" and any(a in actions for a in ("script", "compose")):
+        cand = [a.get("slug") or a.get("name") or "" for a in UPDATE_APP_INFO.get(f"{gtype}/{vmid}", [])]
+        rc, conf_out = await _run(["pct", "config", vmid], 20)
+        tags = re.search(r"^tags:\s*(.+)$", conf_out, re.M)
+        host = re.search(r"^hostname:\s*(.+)$", conf_out, re.M)
+        cand += (tags.group(1).split(";") if tags else []) + ([host.group(1)] if host else [])
+        need = await asyncio.to_thread(app_needs_for, cand)
+        if need:
+            boost = [f"boost={int(need['ram'])}:{int(need.get('cpu') or 1)}:{need['app']}"]
     title = {"system": f"{name}: System aktualisieren", "app": f"{name}: App aktualisieren", "all": f"{name}: alles aktualisieren"}[action]
     job = Job(title, "guest-update", ["python3", GUEST_UPDATE_SCRIPT, gtype, vmid, ",".join(actions),
-                                      "1" if body.get("snapshot") else "0", *files], s.username)
+                                      "1" if body.get("snapshot") else "0", *boost, *files], s.username)
     job.back = f"#/guest/{gtype}/{vmid}"
     job.back_label = name
     JOBS[job.id] = job
@@ -2034,6 +2046,78 @@ async def convert_cleanup(request: Request):
     job.kill_grace = 150
     JOBS[job.id] = job
     return JSONResponse({"data": job.info()})
+
+
+# --------------------------------------------------------------------------
+# Was braucht eine App mindestens? (vor allem fürs Update – da wird oft gebaut/entpackt)
+# Quelle: die Vorgaben im Installationsskript der community-scripts (var_ram/var_cpu),
+# sonst eine kleine Tabelle bekannter Apps.
+# --------------------------------------------------------------------------
+
+APP_NEEDS_CACHE: dict[str, tuple[float, dict | None]] = {}
+APP_NEEDS_FALLBACK = {  # MB RAM, Kerne – nach den Empfehlungen der Projekte
+    "immich": (6144, 4), "paperless-ngx": (3072, 2), "nextcloud": (2048, 2), "jellyfin": (2048, 2),
+    "frigate": (4096, 4), "homeassistant": (2048, 2), "vaultwarden": (512, 1), "nginxproxymanager": (1024, 1),
+    "ollama": (8192, 4), "openwebui": (4096, 4), "plex": (2048, 2), "n8n": (2048, 2), "mealie": (1024, 1),
+}
+APP_SLUG_ALIASES = {"paperless": "paperless-ngx", "npm": "nginxproxymanager", "nginx-proxy-manager": "nginxproxymanager",
+                    "home-assistant": "homeassistant", "ha": "homeassistant", "open-webui": "openwebui"}
+NEEDS_RE = {k: re.compile(rf'var_{k}="?\$\{{var_{k}:-(\d+)\}}') for k in ("ram", "cpu", "disk")}
+
+
+def _norm_slug(name: str) -> str:
+    s = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-")
+    return APP_SLUG_ALIASES.get(s, s)
+
+
+def _app_needs_sync(slug: str) -> dict | None:
+    now = time.time()
+    hit = APP_NEEDS_CACHE.get(slug)
+    if hit and now - hit[0] < 86400:
+        return hit[1]
+    res = None
+    with contextlib.suppress(Exception):
+        url = f"https://raw.githubusercontent.com/{SCRIPTS_REPO}/{SCRIPTS_BRANCH}/ct/{slug}.sh"
+        req = urllib.request.Request(url, headers={"User-Agent": "BetterProxmoxUI"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            text = r.read(200_000).decode(errors="replace")
+        # Größter Wert (manche Skripte haben eine kleinere Alpine-Variante); diese Werte prüft das
+        # Update-Skript selbst (check_container_resources) – darunter fragt bzw. scheitert es
+        vals = {k: max(int(x) for x in found) for k, rx in NEEDS_RE.items() if (found := rx.findall(text))}
+        if "ram" in vals:
+            res = {"ram": vals["ram"], "cpu": vals.get("cpu", 1), "disk": vals.get("disk"), "source": "script"}
+    if res is None and slug in APP_NEEDS_FALLBACK:
+        ram, cpu = APP_NEEDS_FALLBACK[slug]
+        res = {"ram": ram, "cpu": cpu, "disk": None, "source": "table"}
+    APP_NEEDS_CACHE[slug] = (now, res)
+    return res
+
+
+def app_needs_for(names: list[str]) -> dict | None:
+    """Erste passende Vorgabe für eine Liste möglicher App-Namen (Tags, Hostname, erkannte Apps)."""
+    skip = {"", "community-script", "proxmox-helper-scripts", "docker", "lxc", "vm", "debian", "ubuntu", "alpine"}
+    for n in names:
+        slug = _norm_slug(n)
+        if slug in skip or len(slug) > 40:
+            continue
+        r = _app_needs_sync(slug)
+        if r:
+            return {**r, "app": slug}
+    return None
+
+
+async def app_needs(request: Request):
+    s = await get_session(request)
+    if not s:
+        return _err(401, "Nicht angemeldet")
+    jobs = []
+    for item in request.query_params.get("guests", "").split(";")[:60]:
+        vmid, _, names = item.partition(":")
+        if vmid.isdigit():
+            cand = [n for n in names.split(",") if re.fullmatch(r"[A-Za-z0-9._ -]{1,40}", n)][:6]
+            jobs.append((vmid, asyncio.to_thread(app_needs_for, cand)))
+    results = await asyncio.gather(*(j for _, j in jobs), return_exceptions=True)
+    return JSONResponse({"data": {vmid: r for (vmid, _), r in zip(jobs, results) if isinstance(r, dict)}})
 
 
 async def _admin_only(request: Request):
@@ -2309,6 +2393,7 @@ routes = [
     Route("/api/convert/{vmid}", convert_inspect),
     Route("/api/convert/{vmid}", convert_start, methods=["POST"]),
     Route("/api/convert/{vmid}/cleanup", convert_cleanup, methods=["POST"]),
+    Route("/api/app-needs", app_needs),
     Route("/api/audio", audio_info),
     Route("/api/audio/setup", audio_setup, methods=["POST"]),
     Route("/api/audio/{action}", audio_action, methods=["POST"]),

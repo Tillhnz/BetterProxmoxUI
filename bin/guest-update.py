@@ -9,8 +9,11 @@ Aufruf: guest-update.py <lxc|qemu> <vmid> <aktionen> <snapshot:0|1> [compose-dat
   in der VM nachgelesen, damit man den Fortschritt live sieht.
 """
 import base64
+import contextlib
 import json
 import os
+import re
+import signal
 import socket
 import subprocess
 import sys
@@ -105,11 +108,71 @@ def snapshot(kind, vmid):
             print(f"  Alten Snapshot „{old}“ aufgeräumt.")
 
 
+def host_mem_available():
+    with contextlib.suppress(OSError):
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    return 0
+
+
+def lxc_conf(vmid):
+    out = {}
+    for line in run(["pct", "config", vmid]).stdout.splitlines():
+        k, _, v = line.partition(":")
+        out[k.strip()] = v.strip()
+    return out
+
+
+@contextlib.contextmanager
+def update_boost(vmid, boost):
+    """Gibt dem Container für die Dauer des App-Updates so viel RAM/Kerne, wie das Update-Skript verlangt –
+    danach wird wieder auf die alten Werte zurückgestellt. Container übernehmen das ohne Neustart."""
+    if not boost:
+        yield
+        return
+    need_ram, need_cpu, app = boost
+    conf = lxc_conf(vmid)
+    cur_ram, cur_cpu = int(conf.get("memory", 512)), int(conf.get("cores", 0) or 0)
+    changes, restore = [], []
+    if cur_ram < need_ram:
+        free = host_mem_available()
+        give = min(need_ram, cur_ram + max(0, free - 1024))  # 1 GB für den Server übrig lassen
+        if give > cur_ram:
+            changes += ["--memory", str(give)]
+            restore += ["--memory", str(cur_ram)]
+            print(f"\033[1;33m↑\033[0m Für das Update braucht {app} etwa {need_ram} MB RAM, der Container hat {cur_ram} MB – "
+                  f"wird für die Dauer des Updates auf {give} MB erhöht.", flush=True)
+            if give < need_ram:
+                print(f"  Mehr ist gerade nicht frei auf dem Server (frei: {free} MB). Das Update kann trotzdem knapp werden.", flush=True)
+        else:
+            print(f"⚠ {app} braucht für das Update etwa {need_ram} MB RAM, auf dem Server ist aber kaum etwas frei.", flush=True)
+    if cur_cpu and cur_cpu < need_cpu:
+        changes += ["--cores", str(need_cpu)]
+        restore += ["--cores", str(cur_cpu)]
+        print(f"\033[1;33m↑\033[0m Kerne für die Dauer des Updates: {cur_cpu} → {need_cpu}", flush=True)
+    if changes:
+        r = run(["pct", "set", vmid, *changes])
+        if r.returncode != 0:
+            print(f"⚠ Konnte die Größe nicht anpassen: {r.stderr.strip()[-200:]}", flush=True)
+            changes = []
+    try:
+        yield
+    finally:
+        if changes:
+            r = run(["pct", "set", vmid, *restore])
+            print(("\033[1;32m↓\033[0m Größe wieder zurückgestellt (" + " ".join(restore[1::2]) + ")") if r.returncode == 0
+                  else f"⚠ Größe konnte nicht zurückgestellt werden – bitte von Hand prüfen ({' '.join(restore)}).", flush=True)
+
+
 def lxc_running(vmid):
     return "running" in run(["pct", "status", vmid]).stdout
 
 
-def update_lxc(vmid, action, files):
+def update_lxc(vmid, action, files, boost=None):
+    if action in ("script", "compose") and boost:
+        with update_boost(vmid, boost):
+            return update_lxc(vmid, action, files)
     if not lxc_running(vmid):
         print("Der Container ist ausgeschaltet – bitte zuerst starten."); return 1
     if action == "script":
@@ -173,7 +236,15 @@ def main():
     if len(sys.argv) < 5 or sys.argv[1] not in ("lxc", "qemu") or not sys.argv[2].isdigit() or sys.argv[4] not in ("0", "1"):
         print(__doc__); return 2
     kind, vmid, actions, snap = sys.argv[1:5]
+    # Beim Abbrechen sauber beenden, damit eine vorübergehende Größenänderung zurückgestellt wird
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, lambda *_: sys.exit(130))
     files = [f for f in sys.argv[5:] if f.startswith("/")]
+    boost = None
+    for a in sys.argv[5:]:
+        m = re.fullmatch(r"boost=(\d+):(\d+):([\w.-]+)", a)
+        if m:
+            boost = (int(m.group(1)), int(m.group(2)), m.group(3))
     actions = [a for a in actions.split(",") if a in ("system", "script", "compose")]
     if not actions or ("script" in actions and kind != "lxc") or ("compose" in actions and not files):
         print(__doc__); return 2
@@ -181,7 +252,7 @@ def main():
         snapshot(kind, vmid)
     rc = 0
     for a in actions:  # Reihenfolge: erst System, dann Apps
-        r = update_lxc(vmid, a, files) if kind == "lxc" else update_qemu(vmid, a, files)
+        r = update_lxc(vmid, a, files, boost) if kind == "lxc" else update_qemu(vmid, a, files)
         rc = rc or r
     if len(actions) > 1:
         print(("\n\033[1;32m✔ Alles aktualisiert.\033[0m" if rc == 0 else "\n\033[1;33m⚠ Fertig, aber nicht alles hat geklappt – siehe oben.\033[0m"), flush=True)
