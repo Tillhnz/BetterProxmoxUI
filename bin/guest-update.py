@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Proxmox Zentrale – eine Maschine (Container oder VM) aktualisieren.
 
-Aufruf: guest-update.py <lxc|qemu> <vmid> <system|app> <snapshot:0|1>
+Aufruf: guest-update.py <lxc|qemu> <vmid> <aktionen> <snapshot:0|1> [compose-dateien …]
+  aktionen: kommagetrennt aus system, script (Community-Scripts „update“), compose (Docker-Compose-Apps)
 
 * Container: Befehle laufen per `pct exec` direkt im Container (mit Terminal, also auch interaktiv).
 * VMs: Befehle laufen über den QEMU-Gast-Agenten; die Ausgabe wird aus einer Protokolldatei
@@ -47,6 +48,28 @@ if [ -f /var/run/reboot-required ]; then echo "Hinweis: Für einige Updates ist 
 exit $rc
 '''
 
+# Docker-Compose-Apps auf die neuesten Images bringen ("$@" = compose-Dateien)
+COMPOSE_INNER = r'''
+dc() { if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi; }
+vers() { ids=$(dc -f "$1" ps -q 2>/dev/null); [ -n "$ids" ] && docker inspect --format '  {{.Name}}: {{.Config.Image}} {{index .Config.Labels "org.opencontainers.image.version"}}' $ids | sed 's#^  /#  #'; }
+rc=0
+for f in "$@"; do
+  printf '\n\033[1;36m━━ App: %s ━━\033[0m\n' "$f"
+  cd "$(dirname "$f")" || { rc=1; continue; }
+  echo "Vorher:"; vers "$f"
+  printf '\033[1;34m$ docker compose pull\033[0m\n'
+  dc -f "$f" pull || { echo "✘ Herunterladen fehlgeschlagen"; rc=1; continue; }
+  printf '\033[1;34m$ docker compose up -d\033[0m\n'
+  dc -f "$f" up -d --remove-orphans || { echo "✘ Neustart fehlgeschlagen"; rc=1; continue; }
+  echo; echo "Jetzt:"; vers "$f"
+done
+printf '\033[1;34m$ docker image prune -f\033[0m  (alte Images aufräumen)\n'
+docker image prune -f >/dev/null 2>&1 && echo "Alte Images entfernt."
+echo
+if [ $rc -eq 0 ]; then printf '\033[1;32m✔ Apps aktualisiert.\033[0m\n'; else printf '\033[1;31m✘ Mindestens eine App hatte Fehler.\033[0m\n'; fi
+exit $rc
+'''
+
 LOG = "/var/tmp/bpui-update.log"
 RC = "/var/tmp/bpui-update.rc"
 
@@ -86,13 +109,16 @@ def lxc_running(vmid):
     return "running" in run(["pct", "status", vmid]).stdout
 
 
-def update_lxc(vmid, action):
+def update_lxc(vmid, action, files):
     if not lxc_running(vmid):
         print("Der Container ist ausgeschaltet – bitte zuerst starten."); return 1
-    if action == "app":
+    if action == "script":
         say("App aktualisieren (Update-Skript der Community-Scripts)")
         print("Falls Fragen kommen: meist einfach mit Enter bestätigen.\n", flush=True)
         return subprocess.call(["pct", "exec", vmid, "--", "bash", "-lc", "update"])
+    if action == "compose":
+        say("Docker-Apps auf die neueste Version bringen")
+        return subprocess.call(["pct", "exec", vmid, "--", "sh", "-c", COMPOSE_INNER, "sh", *files])
     say("System-Pakete aktualisieren")
     return subprocess.call(["pct", "exec", vmid, "--", "sh", "-c", INNER])
 
@@ -104,13 +130,15 @@ def agent(vmid, *args, timeout=60):
     return json.loads(r.stdout or "{}")
 
 
-def update_qemu(vmid):
-    say("System-Pakete aktualisieren (über den QEMU-Gast-Agenten)")
+def update_qemu(vmid, action="system", files=()):
+    script = INNER if action == "system" else COMPOSE_INNER
+    say("System-Pakete aktualisieren (über den QEMU-Gast-Agenten)" if action == "system"
+        else "Docker-Apps auf die neueste Version bringen (über den QEMU-Gast-Agenten)")
     try:
         agent(vmid, "sh", "-c", f"rm -f {LOG} {RC}")
         # Im Hintergrund starten; Ausgabe landet in einer Datei in der VM
         r = run(["qm", "guest", "exec", vmid, "--synchronous", "0", "--", "sh", "-c",
-                 f"( {INNER} ) >{LOG} 2>&1; echo $? >{RC}"])
+                 f"( {script} ) >{LOG} 2>&1; echo $? >{RC}", "sh", *files])
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip())
     except Exception as e:  # noqa: BLE001
@@ -142,13 +170,21 @@ def update_qemu(vmid):
 
 
 def main():
-    if len(sys.argv) != 5 or sys.argv[1] not in ("lxc", "qemu") or not sys.argv[2].isdigit() \
-            or sys.argv[3] not in ("system", "app") or sys.argv[4] not in ("0", "1"):
+    if len(sys.argv) < 5 or sys.argv[1] not in ("lxc", "qemu") or not sys.argv[2].isdigit() or sys.argv[4] not in ("0", "1"):
         print(__doc__); return 2
-    kind, vmid, action, snap = sys.argv[1:]
+    kind, vmid, actions, snap = sys.argv[1:5]
+    files = [f for f in sys.argv[5:] if f.startswith("/")]
+    actions = [a for a in actions.split(",") if a in ("system", "script", "compose")]
+    if not actions or ("script" in actions and kind != "lxc") or ("compose" in actions and not files):
+        print(__doc__); return 2
     if snap == "1":
         snapshot(kind, vmid)
-    rc = update_lxc(vmid, action) if kind == "lxc" else update_qemu(vmid)
+    rc = 0
+    for a in actions:  # Reihenfolge: erst System, dann Apps
+        r = update_lxc(vmid, a, files) if kind == "lxc" else update_qemu(vmid, a, files)
+        rc = rc or r
+    if len(actions) > 1:
+        print(("\n\033[1;32m✔ Alles aktualisiert.\033[0m" if rc == 0 else "\n\033[1;33m⚠ Fertig, aber nicht alles hat geklappt – siehe oben.\033[0m"), flush=True)
     return rc
 
 

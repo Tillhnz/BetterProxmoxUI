@@ -1718,6 +1718,64 @@ UPDATE_COMMANDS = {
 }
 
 
+# Welche Apps laufen in der Maschine? (Community-Scripts-„update“ und Docker-Compose-Projekte)
+APP_DETECT = r'''
+if [ -x /usr/bin/update ]; then echo "SCRIPT $(grep -o 'ct/[A-Za-z0-9_.-]*\.sh' /usr/bin/update 2>/dev/null | head -1)"; fi
+if command -v docker >/dev/null 2>&1; then
+  if docker compose version >/dev/null 2>&1; then docker compose ls -a --format json 2>/dev/null | sed 's/^/COMPOSE /'; fi
+  docker ps -a --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Image}}|{{.Label "org.opencontainers.image.version"}}|{{.State}}' 2>/dev/null | sed 's/^/IMG /'
+fi
+exit 0
+'''
+KNOWN_APPS = [("immich-server", "Immich", "immich"), ("paperless-ngx", "Paperless-ngx", "paperless-ngx"),
+              ("vaultwarden", "Vaultwarden", "vaultwarden"), ("nginx-proxy-manager", "Nginx Proxy Manager", "nginx-proxy-manager"),
+              ("home-assistant", "Home Assistant", "home-assistant"), ("nextcloud", "Nextcloud", "nextcloud"),
+              ("jellyfin", "Jellyfin", "jellyfin"), ("plex", "Plex", "plex"), ("adguard", "AdGuard Home", "adguard-home"),
+              ("pihole", "Pi-hole", "pi-hole"), ("portainer", "Portainer", "portainer"), ("uptime-kuma", "Uptime Kuma", "uptime-kuma"),
+              ("frigate", "Frigate", "frigate"), ("gitea", "Gitea", "gitea"), ("mealie", "Mealie", "mealie")]
+APP_NOTES = {"Immich": "Immich bringt oft große Neuerungen. Vor einem Sprung über mehrere Versionen kurz die Release-Notes lesen – manchmal muss die docker-compose.yml angepasst werden.",
+             "Paperless-ngx": "Vor großen Versionssprüngen kurz die Release-Notes lesen."}
+UPDATE_APPS: dict[str, list[str]] = {}   # zuletzt erkannte Compose-Dateien je Maschine (nur diese dürfen aktualisiert werden)
+
+
+def _parse_apps(out: str) -> list[dict]:
+    apps, projects, imgs = [], [], {}
+    for line in out.splitlines():
+        if line.startswith("SCRIPT"):
+            m = re.search(r"ct/([A-Za-z0-9_.-]+)\.sh", line)
+            slug = m.group(1).lower() if m else ""
+            nice = next((n for _, n, sl in KNOWN_APPS if sl == slug), None)
+            apps.append({"id": "script", "kind": "script", "name": nice or (slug.replace("-", " ").title() if slug else "App"),
+                         "slug": slug or None, "detail": "Installiert mit den Community-Scripts – deren Update-Skript bringt die App auf die neueste Version.",
+                         "services": [], "pinned": []})
+        elif line.startswith("COMPOSE "):
+            with contextlib.suppress(ValueError):
+                projects += json.loads(line[8:])
+        elif line.startswith("IMG "):
+            p = (line[4:].split("|") + ["", "", "", "", ""])[:5]
+            imgs.setdefault(p[0], []).append({"service": p[1], "image": p[2], "version": p[3], "state": p[4]})
+    for pr in projects:
+        files = [f.strip() for f in str(pr.get("ConfigFiles", "")).split(",") if f.strip().startswith("/")]
+        if not files:
+            continue
+        svcs = imgs.get(pr.get("Name", ""), [])
+        name, slug = pr.get("Name") or files[0].split("/")[-2], None
+        for key, nice, sl in KNOWN_APPS:
+            if any(key in sv["image"] for sv in svcs):
+                name, slug = nice, sl
+                break
+        pinned = []
+        for sv in svcs:
+            ref = sv["image"].rsplit("/", 1)[-1]
+            tag = ref.split(":", 1)[1] if ":" in ref else "latest"
+            if re.fullmatch(r"v?\d+(\.\d+)+([.-].*)?", tag) and "postgres" not in sv["image"] and "redis" not in sv["image"] and "valkey" not in sv["image"]:
+                pinned.append(f"{sv['service']} ist fest auf {tag} eingestellt")
+        apps.append({"id": files[0], "kind": "compose", "name": name, "slug": slug, "file": files[0],
+                     "status": pr.get("Status", ""), "services": svcs, "pinned": pinned,
+                     "detail": APP_NOTES.get(name, "Docker-App: lädt die neuesten Images herunter und startet die App damit neu. Daten bleiben erhalten.")})
+    return apps
+
+
 def _os_family(os_id: str, like: str = "") -> str | None:
     words = f" {os_id} {like} ".lower()
     for fam, keys in (("haos", ["haos"]), ("windows", ["mswindows", "windows"]), ("apt", ["debian", "ubuntu"]),
@@ -1741,8 +1799,7 @@ async def guest_update_info(request: Request):
     rc, out = await _run([tool, "status", vmid], 20)
     if rc != 0:
         return _err(404, "Maschine nicht gefunden")
-    info = {"type": gtype, "running": "running" in out, "family": None, "os_name": None,
-            "app_update": False, "agent": None, "command": None, "snapshot_ok": False}
+    info = {"type": gtype, "running": "running" in out, "family": None, "os_name": None, "apps": [], "agent": None, "command": None, "snapshot_ok": False}
     if gtype == "lxc":
         if info["running"]:
             rc, out = await _run(["pct", "exec", vmid, "--", "sh", "-c",
@@ -1752,7 +1809,8 @@ async def guest_update_info(request: Request):
             if rc == 0:
                 info["family"] = _os_family(lines[0], lines[1])
                 info["os_name"] = lines[2] or lines[0] or None
-                info["app_update"] = "APP" in out.split()
+            rc, out = await _run(["pct", "exec", vmid, "--", "sh", "-c", APP_DETECT], 40)
+            info["apps"] = _parse_apps(out) if rc == 0 else []
     elif info["running"]:
         rc, out = await _run(["qm", "agent", vmid, "get-osinfo"], 20)
         info["agent"] = rc == 0
@@ -1760,8 +1818,13 @@ async def guest_update_info(request: Request):
             with contextlib.suppress(Exception):
                 d = json.loads(out)
                 info["family"] = _os_family(str(d.get("id", "")), "")
+            if info["family"] not in (None, "haos", "windows"):
+                rc, out = await _run(["qm", "guest", "exec", vmid, "--timeout", "40", "--", "sh", "-c", APP_DETECT], 60)
+                with contextlib.suppress(Exception):
+                    info["apps"] = [a for a in _parse_apps(json.loads(out).get("out-data", "")) if a["kind"] == "compose"]
                 info["os_name"] = d.get("pretty-name") or d.get("name")
     info["command"] = UPDATE_COMMANDS.get(info["family"] or "")
+    UPDATE_APPS[f"{gtype}/{vmid}"] = [a["id"] for a in info["apps"]]
     with contextlib.suppress(Exception):
         node = socket.gethostname()
         _, res = await pve_call("GET", f"/nodes/{node}/{gtype}/{vmid}/feature", s.ticket, s.csrf, query="feature=snapshot")
@@ -1780,16 +1843,26 @@ async def guest_update_start(request: Request):
         return _err(400, "Ungültige Maschine")
     body = await request.json()
     action = body.get("action", "system")
-    if action not in ("system", "app") or (action == "app" and gtype != "lxc"):
+    if action not in ("system", "app", "all"):
         return _err(400, "Unbekannte Aktion")
+    known = UPDATE_APPS.get(f"{gtype}/{vmid}", [])
+    wanted = [a for a in (body.get("apps") or known) if a in known] if action in ("app", "all") else []
+    if action == "app" and not wanted:
+        return _err(400, "Keine App zum Aktualisieren gefunden – bitte den Dialog neu öffnen.")
+    if "script" in wanted and gtype != "lxc":
+        return _err(400, "Update-Skripte gibt es nur in Containern.")
+    actions = (["system"] if action in ("system", "all") else []) + (["script"] if "script" in wanted else []) \
+        + (["compose"] if any(w != "script" for w in wanted) else [])
+    files = [w for w in wanted if w != "script"]
     _prune_jobs()
     if any(j.running and j.kind == "guest-update" and j.back == f"#/guest/{gtype}/{vmid}" for j in JOBS.values()):
         return _err(409, "Für diese Maschine läuft schon ein Update.")
     if sum(1 for j in JOBS.values() if j.running and j.kind != "shell") >= MAX_RUNNING:
         return _err(429, "Es laufen schon zu viele Aufgaben gleichzeitig. Bitte warten, bis eine fertig ist.")
     name = str(body.get("name") or f"#{vmid}")[:60]
-    title = f"{name} aktualisieren" if action == "system" else f"App in {name} aktualisieren"
-    job = Job(title, "guest-update", ["python3", GUEST_UPDATE_SCRIPT, gtype, vmid, action, "1" if body.get("snapshot") else "0"], s.username)
+    title = {"system": f"{name}: System aktualisieren", "app": f"{name}: App aktualisieren", "all": f"{name}: alles aktualisieren"}[action]
+    job = Job(title, "guest-update", ["python3", GUEST_UPDATE_SCRIPT, gtype, vmid, ",".join(actions),
+                                      "1" if body.get("snapshot") else "0", *files], s.username)
     job.back = f"#/guest/{gtype}/{vmid}"
     job.back_label = name
     JOBS[job.id] = job

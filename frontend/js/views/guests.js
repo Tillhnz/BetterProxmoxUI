@@ -3,7 +3,7 @@ import {
   toast, errorToast, trackTask, confirmDialog, openSheet, field, input, select, toggle, withBusy, pageHead, empty, relTime,
   guestTypeLabel, dateTime, api, lockBadge, LOCK_TEXT, taskName, parseUpid,
   tabBar,
-  pveLink,
+  pveLink, appAvatar,
 } from "../core.js";
 import { statsSection, sizingSection, hardwareCard, optionsCard, actionsCard, historyCard } from "./guestExtra.js";
 import { guestBackupSection, jobsCovering, describeSchedule, loadBackupItems } from "./backups.js";
@@ -328,12 +328,6 @@ function updateSheet(type, vmid, name, go, ips = []) {
     try { info = (await api(`/guests/${type}/${vmid}/update`)).data; }
     catch (e) { clear(body).append(callout("bad", "Konnte nicht geprüft werden", e.message)); return; }
     clear(body);
-    const start = async (btn, action, snapshot) => withBusy(btn, async () => {
-      try {
-        const r = await api(`/guests/${type}/${vmid}/update`, { method: "POST", body: { action, snapshot, name } });
-        close(); go(`job/${r.data.id}`);
-      } catch (e) { errorToast(e); }
-    });
 
     if (!info.running) {
       body.append(callout("info", "Die Maschine ist ausgeschaltet", "Updates lassen sich nur installieren, während sie läuft. Starte sie zuerst."));
@@ -365,32 +359,67 @@ function updateSheet(type, vmid, name, go, ips = []) {
     }
 
     let snapshot = !!info.snapshot_ok;
-    const sysBtn = h("button", { class: "btn primary" }, icon("download", "sm"), "System aktualisieren");
-    sysBtn.addEventListener("click", () => start(sysBtn, "system", snapshot));
+    const apps = info.apps || [];
+    const go2 = (btn, action, appIds) => withBusy(btn, async () => {
+      try {
+        const r = await api(`/guests/${type}/${vmid}/update`, { method: "POST", body: { action, snapshot, name, apps: appIds } });
+        close(); go(`job/${r.data.id}`);
+      } catch (e) { errorToast(e); }
+    });
+    const section = (title, ...kids) => h("div", { class: "stack", style: { gap: "10px", marginTop: "6px" } },
+      h("div", { class: "muted", style: { fontSize: "12.5px", fontWeight: 650, textTransform: "uppercase", letterSpacing: ".04em" } }, title), ...kids);
+
+    body.append(
+      h("p", { class: "muted", style: { margin: 0 } }, info.os_name ? `Erkannt: ${info.os_name}. ` : "",
+        apps.length ? `Darauf läuft: ${apps.map(a => a.name).join(", ")}.` : "Keine App gefunden, die sich gesondert aktualisieren lässt – nur das System."),
+      toggle("Vorher Snapshot anlegen", info.snapshot_ok ? "Falls nach dem Update etwas nicht klappt, kannst du zurückspringen. Die letzten 3 bleiben, ältere werden aufgeräumt."
+        : "Der Speicher dieser Maschine kann keine Snapshots – vorher besser eine Sicherung machen.", snapshot, (v) => { snapshot = v; }));
+    if (!info.snapshot_ok) body.querySelector(".toggle input").disabled = true;
+
+    // Alles auf einmal
+    if (apps.length) {
+      const allBtn = h("button", { class: "btn primary" }, icon("download", "sm"), "Alles aktualisieren");
+      allBtn.addEventListener("click", () => go2(allBtn, "all", apps.map(a => a.id)));
+      body.append(h("div", { class: "card flat", style: { padding: "14px 16px" } },
+        h("strong", null, "System und Apps"),
+        h("p", { class: "muted", style: { margin: "4px 0 10px" } },
+          `Erst die System-Pakete, danach ${apps.map(a => a.name).join(" und ")} auf die neueste Version.`),
+        h("div", { class: "row wrap" }, allBtn)));
+    }
+
+    // Apps einzeln
+    if (apps.length) {
+      body.append(section("Apps", ...apps.map(a => {
+        const main = (a.services || []).find(sv => sv.version) || null;
+        const btn = h("button", { class: "btn sm" }, icon("download", "sm"), `Nur ${a.name}`);
+        btn.addEventListener("click", () => go2(btn, "app", [a.id]));
+        return h("div", { class: "howto", style: { borderTop: 0, paddingTop: 0 } },
+          appAvatar(a.slug, a.name, { size: 42 }),
+          h("div", { class: "grow", style: { minWidth: 0 } },
+            h("div", { class: "row wrap", style: { gap: "6px 10px" } }, h("strong", null, a.name),
+              main ? h("span", { class: "badge" }, `jetzt ${main.version}`) : null,
+              h("span", { class: "badge" }, a.kind === "script" ? "Community-Script" : "Docker")),
+            h("p", { class: "muted small", style: { margin: "4px 0 6px" } }, a.detail),
+            ...(a.pinned || []).map(t => h("div", { class: "small", style: { color: "var(--warn)", marginBottom: "6px" } },
+              `⚠ ${t} – dieser Teil bleibt auf dieser Version. Zum Wechseln die Versionsangabe in der docker-compose.yml bzw. .env ändern.`)),
+            a.kind === "compose" ? h("div", { class: "muted small", style: { marginBottom: "8px" } }, h("code", { class: "mono" }, a.file)) : null,
+            btn));
+      })));
+    }
+
+    // System-Pakete
+    const sysBtn = h("button", { class: apps.length ? "btn sm" : "btn primary" }, icon("download", "sm"), apps.length ? "Nur System" : "System aktualisieren");
+    sysBtn.addEventListener("click", () => go2(sysBtn, "system", []));
     const copyBtn = h("button", { class: "btn sm ghost", title: "Befehl kopieren", onclick: async () => {
       try { await navigator.clipboard.writeText(info.command); toast("Befehl kopiert"); } catch { /* egal */ }
     } }, icon("copy", "sm"));
-    body.append(
-      h("p", { class: "muted", style: { margin: 0 } }, info.os_name ? `Erkannt: ${info.os_name}. ` : "",
-        type === "lxc" ? "Der Befehl läuft direkt im Container." : "Der Befehl läuft über den QEMU-Gast-Agenten in der VM."),
+    body.append(section("System-Pakete",
+      h("p", { class: "muted small", style: { margin: 0 } }, "Aktualisiert das Betriebssystem darunter – die App selbst bleibt dabei auf ihrer Version. ",
+        type === "lxc" ? "Läuft direkt im Container." : "Läuft über den QEMU-Gast-Agenten in der VM."),
       h("div", null, h("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "6px" } },
-        h("strong", null, "Dieser Befehl wird ausgeführt"), copyBtn),
+        h("span", { class: "small" }, "Dieser Befehl wird ausgeführt"), copyBtn),
       h("pre", { class: "cmd-box" }, info.command)),
-      toggle("Vorher Snapshot anlegen", info.snapshot_ok ? "Falls nach dem Update etwas nicht klappt, kannst du zurückspringen. Die letzten 3 bleiben, ältere werden aufgeräumt."
-        : "Der Speicher dieser Maschine kann keine Snapshots – vorher besser eine Sicherung machen.", snapshot, (v) => { snapshot = v; }),
-      h("div", { class: "row wrap" }, sysBtn));
-    if (!info.snapshot_ok) body.querySelector(".toggle input").disabled = true;
-
-    if (info.app_update) {
-      const appBtn = h("button", { class: "btn" }, icon("apps", "sm"), "App aktualisieren");
-      appBtn.addEventListener("click", () => start(appBtn, "app", snapshot));
-      body.append(h("div", { class: "card flat", style: { marginTop: "6px" } },
-        h("strong", null, "Die App selbst aktualisieren"),
-        h("p", { class: "muted", style: { margin: "4px 0 10px" } },
-          "Dieser Container wurde mit den Community-Scripts installiert. Deren Update-Skript bringt die App selbst (z. B. Immich oder Paperless) auf die neueste Version – das machen die System-Updates nicht. Befehl im Container: ",
-          h("code", { class: "mono" }, "update")),
-        h("div", { class: "row wrap" }, appBtn)));
-    }
+      h("div", { class: "row wrap" }, sysBtn)));
   });
 }
 
