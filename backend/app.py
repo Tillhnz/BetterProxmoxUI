@@ -1058,6 +1058,9 @@ def _prune_jobs():
             JOBS.pop(j.id, None)
 
 
+FILEHELPER_URL = os.environ.get("BPUI_FILEHELPER_URL", "https://raw.githubusercontent.com/Tillhnz/FileHelper/main/proxmox/create-lxc.sh")
+
+
 def _raw_url(path: str) -> str:
     return f"https://raw.githubusercontent.com/{SCRIPTS_REPO}/{SCRIPTS_BRANCH}/{path}"
 
@@ -1092,6 +1095,10 @@ async def jobs_create(request: Request):
             return _err(400, "Unbekanntes Skript")
         title = body.get("title") or _title_from_path(path)
         argv = ["bash", "-c", f'bash -c "$(curl -fsSL {_raw_url(path)})"']
+    elif kind == "filehelper":
+        # FileHelper (Dateien im Browser) als eigenen LXC anlegen – oder vorhandenen aktualisieren
+        title = "FileHelper installieren / aktualisieren"
+        argv = ["bash", "-c", f'bash -c "$(curl -fsSL {FILEHELPER_URL})"']
     elif kind == "upgrade":
         title = "Proxmox-Updates installieren"
         argv = ["bash", "-c", "apt-get update && apt-get -y dist-upgrade; echo; "
