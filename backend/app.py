@@ -2121,6 +2121,71 @@ async def app_needs(request: Request):
     return JSONResponse({"data": {vmid: r for (vmid, _), r in zip(jobs, results) if isinstance(r, dict)}})
 
 
+# --------------------------------------------------------------------------
+# Veraltete Update-Skripte (tteck/Proxmox → community-scripts/ProxmoxVE) in allen Containern
+# --------------------------------------------------------------------------
+
+def _script_exists_sync(name: str) -> bool | None:
+    url = f"https://raw.githubusercontent.com/{SCRIPTS_REPO}/{SCRIPTS_BRANCH}/ct/{name}"
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "BetterProxmoxUI"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status == 200
+    except urllib.error.HTTPError as e:
+        return False if e.code == 404 else None
+    except Exception:  # noqa: BLE001 – kein Internet o. Ä.
+        return None
+
+
+async def _scan_update_sources() -> list[dict]:
+    rc, out = await _run(["pct", "list"], 30)
+    rows = []
+    for line in out.splitlines()[1:]:
+        p = line.split()
+        if len(p) >= 2 and p[0].isdigit():
+            rows.append({"vmid": int(p[0]), "running": p[1] == "running", "name": p[-1] if len(p) >= 3 else p[0]})
+    sem = asyncio.Semaphore(6)
+
+    async def one(r):
+        if not r["running"]:
+            return {**r, "state": "stopped"}
+        async with sem:
+            rc, txt = await _run(["pct", "exec", str(r["vmid"]), "--", "cat", "/usr/bin/update"], 20)
+        if rc != 0 or "bash" not in txt:
+            return {**r, "state": "none"}
+        m = re.search(r"ct/([\w.-]+\.sh)", txt)
+        old = "tteck/Proxmox" in txt
+        res = {**r, "state": "old" if old else "ok", "script": m.group(1) if m else None}
+        if old and res["script"]:
+            res["available"] = await asyncio.to_thread(_script_exists_sync, res["script"])
+        return res
+    return list(await asyncio.gather(*(one(r) for r in rows)))
+
+
+async def update_sources(request: Request):
+    s, err = await _convert_admin(request)
+    if err:
+        return err
+    return JSONResponse({"data": await _scan_update_sources()})
+
+
+async def update_sources_fix(request: Request):
+    s, err = await _convert_admin(request)
+    if err:
+        return err
+    fixed, skipped = [], []
+    for r in await _scan_update_sources():
+        if r["state"] != "old":
+            continue
+        if r.get("available") is False:
+            skipped.append({**r, "why": "Skript gibt es bei den community-scripts nicht mehr"})
+            continue
+        rc, out = await _run(["pct", "exec", str(r["vmid"]), "--", "sed", "-i",
+                              "s#tteck/Proxmox#community-scripts/ProxmoxVE#g", "/usr/bin/update"], 20)
+        (fixed if rc == 0 else skipped).append(r if rc == 0 else {**r, "why": out.strip()[-160:]})
+    return JSONResponse({"data": {"fixed": fixed, "skipped": skipped}})
+
+
 async def _admin_only(request: Request):
     s = await get_session(request)
     if not s:
@@ -2395,6 +2460,8 @@ routes = [
     Route("/api/convert/{vmid}", convert_start, methods=["POST"]),
     Route("/api/convert/{vmid}/cleanup", convert_cleanup, methods=["POST"]),
     Route("/api/app-needs", app_needs),
+    Route("/api/update-sources", update_sources),
+    Route("/api/update-sources/fix", update_sources_fix, methods=["POST"]),
     Route("/api/audio", audio_info),
     Route("/api/audio/setup", audio_setup, methods=["POST"]),
     Route("/api/audio/{action}", audio_action, methods=["POST"]),

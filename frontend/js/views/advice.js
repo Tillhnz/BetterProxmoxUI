@@ -48,6 +48,7 @@ export async function runChecks({ force = false } = {}) {
     settle(pve("GET", "/cluster/firewall/options")),
     admin ? settle(api("/host/checks").then(r => r.data)) : Promise.resolve(null),
   ]);
+  const sources = admin ? await settle(api("/update-sources").then(r => r.data)) : null;
   const items = [];
   const add = (it) => items.push(it);
   const guests = (res || []).filter(r => (r.type === "qemu" || r.type === "lxc") && r.node === node && !r.template);
@@ -123,6 +124,23 @@ export async function runChecks({ force = false } = {}) {
         todo: "Prüfe unter „Aktivität“, ob die Sicherungen fehlschlagen (z. B. weil der Speicher voll oder die NAS aus ist), und starte eine Sicherung von Hand.",
         guests: old, actions: [{ label: "Aktivität ansehen", href: "#/tasks" }, { label: "Jetzt sichern", href: "#/backups" }] });
     }
+  }
+
+  // ---------- Pflege: veraltete Update-Skripte (tteck → community-scripts) ----------
+  if (sources) {
+    const old = sources.filter(r => r.state === "old");
+    if (old.length) add({ id: `update-sources-${old.map(r => r.vmid).join("-")}`, level: "warn", cat: "system",
+      title: `${old.length} Container ${old.length === 1 ? "nutzt" : "nutzen"} ein veraltetes Update-Skript`,
+      why: `${old.map(r => r.name).join(", ")} ${old.length === 1 ? "ruft" : "rufen"} beim App-Update noch das stillgelegte Projekt „tteck/Proxmox“ auf. Dessen Skripte passen nicht mehr zu neuen App-Versionen und brechen mitten im Update ab – die App läuft danach nicht mehr.`,
+      todo: "Auf die weitergepflegten community-scripts umstellen. Das ändert nur, woher das Update-Skript geladen wird – an der App selbst ändert sich nichts.",
+      guests: old.map(r => guests.find(g => g.vmid === r.vmid)).filter(Boolean),
+      actions: [{ label: "Alle umstellen", run: async () => {
+        const r = (await api("/update-sources/fix", { method: "POST" })).data;
+        toast(`${r.fixed.length} Update-Skript${r.fixed.length === 1 ? "" : "e"} umgestellt`,
+          r.skipped.length ? `Nicht umgestellt: ${r.skipped.map(x => `${x.name} (${x.why})`).join(", ")}` : "Ab jetzt holen die Container ihre Updates von den community-scripts.", r.skipped.length ? "warn" : "ok");
+      } }] });
+    const stopped = sources.filter(r => r.state === "stopped");
+    if (old.length && stopped.length) items[items.length - 1].why += ` Ausgeschaltete Container (${stopped.map(r => r.name).join(", ")}) konnten nicht geprüft werden – nach dem Einschalten erscheinen sie hier ggf. auch.`;
   }
 
   // ---------- Leistung: passt die Größe der Dienste? ----------
