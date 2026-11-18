@@ -391,7 +391,9 @@ function updateSheet(type, vmid, name, go, ips = []) {
     if (apps.length) {
       body.append(section("Apps", ...apps.map(a => {
         const main = (a.services || []).find(sv => sv.version) || null;
-        const btn = h("button", { class: "btn sm" }, icon("download", "sm"), `Nur ${a.name}`);
+        const mig = a.migration || null;
+        const btn = h("button", { class: "btn sm", disabled: !!mig?.blocker }, icon("download", "sm"),
+          mig?.old_dirs?.length ? `Ordner umziehen & ${a.name} aktualisieren` : `Nur ${a.name}`);
         btn.addEventListener("click", () => go2(btn, "app", [a.id]));
         return h("div", { class: "howto", style: { borderTop: 0, paddingTop: 0 } },
           appAvatar(a.slug, a.name, { size: 42 }),
@@ -403,6 +405,13 @@ function updateSheet(type, vmid, name, go, ips = []) {
             ...(a.pinned || []).map(t => h("div", { class: "small", style: { color: "var(--warn)", marginBottom: "6px" } },
               `⚠ ${t} – dieser Teil bleibt auf dieser Version. Zum Wechseln die Versionsangabe in der docker-compose.yml bzw. .env ändern.`)),
             a.kind === "compose" ? h("div", { class: "muted small", style: { marginBottom: "8px" } }, h("code", { class: "mono" }, a.file)) : null,
+            mig?.blocker ? h("div", { style: { marginBottom: "8px" } }, callout("bad", "Update auf v3 so nicht möglich", mig.blocker)) : null,
+            mig?.steps?.length ? (() => {
+              const c = callout("warn", `Großes Update${mig.version ? ` (installiert: ${mig.version})` : ""} – das passiert dabei`, null);
+              c.querySelector("div").append(h("ul", { class: "plain-list small", style: { margin: "6px 0 0" } }, mig.steps.map(t => h("li", null, t)),
+                h("li", null, "Vorher unbedingt den Snapshot anlassen – dann geht es bei Problemen mit einem Klick zurück.")));
+              return h("div", { style: { marginBottom: "8px" } }, c);
+            })() : null,
             btn));
       })));
     }

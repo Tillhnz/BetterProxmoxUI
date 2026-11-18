@@ -73,6 +73,49 @@ if [ $rc -eq 0 ]; then printf '\033[1;32m✔ Apps aktualisiert.\033[0m\n'; else 
 exit $rc
 '''
 
+# Paperless-ngx (Community-Scripts): Daten von /opt/paperless/{consume,data,media} nach /opt/paperless_data/
+PL_MIGRATE = r'''
+set -u
+B=/opt/paperless; N=/opt/paperless_data; C=$B/paperless.conf
+mkdir -p $N/consume $N/data $N/index $N/media $N/trash
+for d in consume data media; do
+  [ -d "$B/$d" ] && [ ! -L "$B/$d" ] || continue
+  if mountpoint -q "$N/$d"; then
+    # Laufwerk/NAS-Ordner wurde bereits an den neuen Ort eingebunden – alter Ordner muss leer sein
+    if rmdir "$B/$d" 2>/dev/null; then echo "✔ $d: eingebundener Ordner liegt jetzt unter $N/$d"; else
+      echo "✘ $B/$d ist nicht leer, obwohl $N/$d schon eingebunden ist – bitte von Hand prüfen."; exit 3; fi
+  else
+    if [ -n "$(ls -A "$N/$d" 2>/dev/null)" ]; then echo "✘ $N/$d ist nicht leer – Abbruch, damit nichts überschrieben wird."; exit 3; fi
+    rmdir "$N/$d" && mv "$B/$d" "$N/$d" || { echo "✘ $d konnte nicht verschoben werden"; exit 3; }
+    echo "✔ $d nach $N/$d verschoben"
+  fi
+  ln -s "$N/$d" "$B/$d"
+done
+# Einstellungen: nur Pfade umstellen, die auf den alten Ort zeigen (eigene Pfade wie /mnt/… bleiben)
+setkey() {
+  k=$1; v=$2
+  cur=$(sed -n "s|^$k=||p" "$C" | tail -n1 | tr -d "\"'")
+  if grep -q "^$k=" "$C"; then
+    case "$cur" in /opt/paperless/*|../*|"") sed -i "s|^$k=.*|$k=$v|" "$C"; echo "  $k=$v";;
+      *) echo "  $k bleibt $cur (eigener Pfad)";; esac
+  else
+    echo "$k=$v" >> "$C"; echo "  $k=$v"
+  fi
+}
+echo "Einstellungen in $C:"
+setkey PAPERLESS_CONSUMPTION_DIR $N/consume
+setkey PAPERLESS_DATA_DIR $N/data
+setkey PAPERLESS_MEDIA_ROOT $N/media
+grep -q "^PAPERLESS_EMPTY_TRASH_DIR=" "$C" || { echo "PAPERLESS_EMPTY_TRASH_DIR=$N/trash" >> "$C"; echo "  PAPERLESS_EMPTY_TRASH_DIR=$N/trash"; }
+# Scanner-Freigabe (Samba im Container) mitziehen
+if [ -f /etc/samba/smb.conf ] && grep -q "/opt/paperless/\(consume\|media\)" /etc/samba/smb.conf; then
+  sed -i "s|/opt/paperless/consume|$N/consume|g; s|/opt/paperless/media|$N/media|g" /etc/samba/smb.conf
+  systemctl restart smbd 2>/dev/null; echo "✔ Samba-Freigabe auf den neuen Ort umgestellt"
+fi
+exit 0
+'''
+PL_SERVICES = ["paperless-consumer", "paperless-webserver", "paperless-scheduler", "paperless-task-queue"]
+
 LOG = "/var/tmp/bpui-update.log"
 RC = "/var/tmp/bpui-update.rc"
 
@@ -187,6 +230,53 @@ def fix_update_source(vmid):
     print("\033[1;33m↻\033[0m Update-Quelle von tteck/Proxmox (stillgelegt) auf community-scripts/ProxmoxVE umgestellt.", flush=True)
 
 
+def paperless_migrate(vmid):
+    say("Paperless-ngx: Ordner in die neue Struktur umziehen")
+    print("Das aktuelle Update-Skript erwartet die Daten unter /opt/paperless_data/ – sonst bricht es ab.", flush=True)
+    run(["pct", "exec", vmid, "--", "systemctl", "stop", *PL_SERVICES])
+    print("✔ Paperless-Dienste angehalten", flush=True)
+    # Laufwerke/NAS-Ordner, die Proxmox an die alten Pfade bindet, an den neuen Ort umhängen
+    conf = lxc_conf(vmid)
+    moves = []
+    for k, v in conf.items():
+        m = re.match(r"mp\d+$", k)
+        mp = re.search(r"(?:^|,)mp=(/opt/paperless/(consume|data|media))/?(?:,|$)", v)
+        if m and mp:
+            moves.append((k, v.replace(f"mp={mp.group(1)}", f"mp=/opt/paperless_data/{mp.group(2)}")))
+    if moves:
+        print(f"Eingebundene Ordner werden umgehängt: {', '.join(k for k, _ in moves)} (Container startet dafür kurz neu)", flush=True)
+        run(["pct", "stop", vmid])
+        for k, v in moves:
+            r = run(["pct", "set", vmid, f"--{k}", v])
+            if r.returncode != 0:
+                print(f"✘ {k} ließ sich nicht umstellen: {r.stderr.strip()[-200:]}", flush=True)
+                run(["pct", "start", vmid]); return 1
+            print(f"✔ {k} → {v.split('mp=')[1].split(',')[0]}", flush=True)
+        run(["pct", "start", vmid])
+        for _ in range(30):
+            if run(["pct", "exec", vmid, "--", "systemctl", "is-system-running"]).stdout.strip() in ("running", "degraded"):
+                break
+            time.sleep(2)
+        run(["pct", "exec", vmid, "--", "systemctl", "stop", *PL_SERVICES])
+    rc = subprocess.call(["pct", "exec", vmid, "--", "sh", "-c", PL_MIGRATE])
+    run(["pct", "exec", vmid, "--", "systemctl", "start", *PL_SERVICES])
+    if rc != 0:
+        print("\n\033[1;31m✘ Umzug abgebrochen – es wurde nichts überschrieben. Paperless läuft weiter wie vorher.\033[0m", flush=True)
+        return rc
+    print("Prüfe, ob Paperless mit dem neuen Ort startet …", flush=True)
+    for _ in range(30):
+        time.sleep(3)
+        if run(["pct", "exec", vmid, "--", "systemctl", "is-active", "paperless-webserver"]).stdout.strip() == "active":
+            print("\033[1;32m✔ Paperless läuft mit der neuen Ordnerstruktur.\033[0m", flush=True)
+            return 0
+    print("\033[1;33m⚠ Paperless-Webserver startet nicht – Details: journalctl -u paperless-webserver\033[0m", flush=True)
+    return 1
+
+
+def paperless_version(vmid):
+    return run(["pct", "exec", vmid, "--", "sh", "-c", "cat ~/.paperless 2>/dev/null"]).stdout.strip().lstrip("v")
+
+
 def lxc_running(vmid):
     return "running" in run(["pct", "status", vmid]).stdout
 
@@ -197,11 +287,21 @@ def update_lxc(vmid, action, files, boost=None):
             return update_lxc(vmid, action, files)
     if not lxc_running(vmid):
         print("Der Container ist ausgeschaltet – bitte zuerst starten."); return 1
+    if action == "plmigrate":
+        return paperless_migrate(vmid)
     if action == "script":
         say("App aktualisieren (Update-Skript der Community-Scripts)")
         fix_update_source(vmid)
         print("Falls Fragen kommen: meist einfach mit Enter bestätigen.\n", flush=True)
-        return subprocess.call(["pct", "exec", vmid, "--", "bash", "-lc", "update"])
+        before = paperless_version(vmid)
+        rc = subprocess.call(["pct", "exec", vmid, "--", "bash", "-lc", "update"])
+        after = paperless_version(vmid)
+        # Paperless: von älteren 2.x geht es erst auf 2.20.15 (Brücke), dann auf v3 – zweiten Schritt gleich anhängen
+        if rc == 0 and before and after == "2.20.15" and before != after:
+            say("Paperless-ngx: Schritt 2 – von 2.20.15 auf v3")
+            print("Das Skript fragt gleich, ob verschlüsselte Dokumente ausgeschlossen sind – mit „y“ bestätigen.\n", flush=True)
+            rc = subprocess.call(["pct", "exec", vmid, "--", "bash", "-lc", "update"])
+        return rc
     if action == "compose":
         say("Docker-Apps auf die neueste Version bringen")
         return subprocess.call(["pct", "exec", vmid, "--", "sh", "-c", COMPOSE_INNER, "sh", *files])
@@ -268,8 +368,8 @@ def main():
         m = re.fullmatch(r"boost=(\d+):(\d+):([\w.-]+)", a)
         if m:
             boost = (int(m.group(1)), int(m.group(2)), m.group(3))
-    actions = [a for a in actions.split(",") if a in ("system", "script", "compose")]
-    if not actions or ("script" in actions and kind != "lxc") or ("compose" in actions and not files):
+    actions = [a for a in actions.split(",") if a in ("system", "plmigrate", "script", "compose")]
+    if not actions or (("script" in actions or "plmigrate" in actions) and kind != "lxc") or ("compose" in actions and not files):
         print(__doc__); return 2
     if snap == "1":
         snapshot(kind, vmid)
@@ -277,6 +377,8 @@ def main():
     for a in actions:  # Reihenfolge: erst System, dann Apps
         r = update_lxc(vmid, a, files, boost) if kind == "lxc" else update_qemu(vmid, a, files)
         rc = rc or r
+        if a == "plmigrate" and r != 0:
+            break  # ohne Umzug würde das Paperless-Update ohnehin abbrechen
     if len(actions) > 1:
         print(("\n\033[1;32m✔ Alles aktualisiert.\033[0m" if rc == 0 else "\n\033[1;33m⚠ Fertig, aber nicht alles hat geklappt – siehe oben.\033[0m"), flush=True)
     return rc

@@ -1721,6 +1721,11 @@ UPDATE_COMMANDS = {
 # Welche Apps laufen in der Maschine? (Community-Scripts-„update“ und Docker-Compose-Projekte)
 APP_DETECT = r'''
 if [ -x /usr/bin/update ]; then echo "SCRIPT $(grep -o 'ct/[A-Za-z0-9_.-]*\.sh' /usr/bin/update 2>/dev/null | head -1) $(grep -q tteck/Proxmox /usr/bin/update && echo OLD)"; fi
+if [ -f /opt/paperless/paperless.conf ]; then
+  o=""; for d in consume data media; do [ -d /opt/paperless/$d ] && [ ! -L /opt/paperless/$d ] && o="$o $d"; done
+  echo "PLOLD$o"; echo "PLVER $(cat ~/.paperless 2>/dev/null)"
+  grep -q '^PAPERLESS_PASSPHRASE=..*' /opt/paperless/paperless.conf && echo PLPASS
+fi
 if command -v docker >/dev/null 2>&1; then
   if docker compose version >/dev/null 2>&1; then docker compose ls -a --format json 2>/dev/null | sed 's/^/COMPOSE /'; fi
   docker ps -a --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Image}}|{{.Label "org.opencontainers.image.version"}}|{{.State}}' 2>/dev/null | sed 's/^/IMG /'
@@ -1740,7 +1745,7 @@ UPDATE_APP_INFO: dict[str, list[dict]] = {}   # zuletzt erkannte Compose-Dateien
 
 
 def _parse_apps(out: str) -> list[dict]:
-    apps, projects, imgs = [], [], {}
+    apps, projects, imgs, pl = [], [], {}, {}
     for line in out.splitlines():
         if line.startswith("SCRIPT"):
             m = re.search(r"ct/([A-Za-z0-9_.-]+)\.sh", line)
@@ -1750,12 +1755,37 @@ def _parse_apps(out: str) -> list[dict]:
                          "slug": slug or None, "detail": "Installiert mit den Community-Scripts – deren Update-Skript bringt die App auf die neueste Version."
                          + (" Hinweis: Dieser Container nutzt noch das alte, stillgelegte Skript (tteck) – es wird beim Update automatisch auf die aktuellen Community-Scripts umgestellt." if line.rstrip().endswith(" OLD") else ""),
                          "services": [], "pinned": []})
+        elif line.startswith("PLOLD"):
+            pl["old"] = line[5:].split()
+        elif line.startswith("PLVER"):
+            pl["version"] = line[5:].strip().lstrip("v")
+        elif line.startswith("PLPASS"):
+            pl["encrypted"] = True
         elif line.startswith("COMPOSE "):
             with contextlib.suppress(ValueError):
                 projects += json.loads(line[8:])
         elif line.startswith("IMG "):
             p = (line[4:].split("|") + ["", "", "", "", ""])[:5]
             imgs.setdefault(p[0], []).append({"service": p[1], "image": p[2], "version": p[3], "state": p[4]})
+    # Paperless-ngx (Community-Scripts): neue Ordnerstruktur und Sprung auf v3
+    script_app = next((a for a in apps if a["kind"] == "script"), None)
+    if script_app and pl:
+        ver = pl.get("version") or ""
+        steps = []
+        if pl.get("old"):
+            steps.append("Die Daten liegen noch in der alten Ordnerstruktur (/opt/paperless/…). Das aktuelle Update-Skript bricht dann ab. "
+                         "Die Zentrale zieht die Ordner vorher automatisch nach /opt/paperless_data/ um und passt die Einstellungen an.")
+        if ver.startswith("2.") and ver != "2.20.15":
+            steps.append(f"Von {ver} geht es in zwei Schritten auf v3: erst auf 2.20.15, dann auf v3 – beides läuft automatisch nacheinander.")
+        elif ver == "2.20.15":
+            steps.append("Als Nächstes kommt der Sprung auf v3. Das Update-Skript stellt dabei eine Frage – mit „y“ bestätigen.")
+        if ver.startswith("2."):
+            steps.append("v3 benennt einige Einstellungen um. Das Update-Skript stellt sie selbst um und behält dein bisheriges Verhalten bei (z. B. werden Doppelte weiter abgelehnt). "
+                         "Die Volltextsuche baut sich beim ersten Start neu auf – das kann je nach Dokumentenzahl etwas dauern. Eventuell musst du dich danach neu anmelden.")
+        script_app["migration"] = {"old_dirs": pl.get("old", []), "version": ver or None, "encrypted": bool(pl.get("encrypted")), "steps": steps}
+        if pl.get("encrypted"):
+            script_app["migration"]["blocker"] = ("Die Dokumente sind verschlüsselt (PAPERLESS_PASSPHRASE). v3 kann das nicht mehr – "
+                                                  "vor dem Update müssen sie entschlüsselt werden (manage.py decrypt_documents).")
     for pr in projects:
         files = [f.strip() for f in str(pr.get("ConfigFiles", "")).split(",") if f.strip().startswith("/")]
         if not files:
@@ -1854,7 +1884,13 @@ async def guest_update_start(request: Request):
         return _err(400, "Keine App zum Aktualisieren gefunden – bitte den Dialog neu öffnen.")
     if "script" in wanted and gtype != "lxc":
         return _err(400, "Update-Skripte gibt es nur in Containern.")
-    actions = (["system"] if action in ("system", "all") else []) + (["script"] if "script" in wanted else []) \
+    script_info = next((a for a in UPDATE_APP_INFO.get(f"{gtype}/{vmid}", []) if a["kind"] == "script"), {})
+    mig = script_info.get("migration") or {}
+    if "script" in wanted and mig.get("blocker"):
+        return _err(400, mig["blocker"])
+    actions = (["system"] if action in ("system", "all") else []) \
+        + (["plmigrate"] if "script" in wanted and mig.get("old_dirs") else []) \
+        + (["script"] if "script" in wanted else []) \
         + (["compose"] if any(w != "script" for w in wanted) else [])
     files = [w for w in wanted if w != "script"]
     _prune_jobs()
