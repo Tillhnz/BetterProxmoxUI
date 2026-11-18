@@ -165,6 +165,28 @@ def update_boost(vmid, boost):
                   else f"⚠ Größe konnte nicht zurückgestellt werden – bitte von Hand prüfen ({' '.join(restore)}).", flush=True)
 
 
+def fix_update_source(vmid):
+    """Ältere Container rufen beim „update“ noch das stillgelegte Original-Repo tteck/Proxmox auf. Dessen Skripte
+    passen nicht mehr zu neuen App-Versionen und brechen mittendrin ab. → auf community-scripts/ProxmoxVE umstellen."""
+    r = run(["pct", "exec", vmid, "--", "cat", "/usr/bin/update"])
+    if "tteck/Proxmox" not in r.stdout:
+        return
+    m = re.search(r"ct/([\w.-]+\.sh)", r.stdout)
+    url = f"https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/{m.group(1)}" if m else None
+    exists = False
+    if url:
+        import urllib.request
+        with contextlib.suppress(Exception):
+            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "BetterProxmoxUI"})
+            exists = urllib.request.urlopen(req, timeout=10).status == 200
+    if not exists:
+        print("\033[1;33m⚠ Dieser Container nutzt noch das alte, stillgelegte Update-Skript (tteck/Proxmox) – "
+              "ein aktuelles Gegenstück wurde nicht gefunden. Das Update kann scheitern.\033[0m", flush=True)
+        return
+    run(["pct", "exec", vmid, "--", "sed", "-i", "s#tteck/Proxmox#community-scripts/ProxmoxVE#g", "/usr/bin/update"])
+    print("\033[1;33m↻\033[0m Update-Quelle von tteck/Proxmox (stillgelegt) auf community-scripts/ProxmoxVE umgestellt.", flush=True)
+
+
 def lxc_running(vmid):
     return "running" in run(["pct", "status", vmid]).stdout
 
@@ -177,6 +199,7 @@ def update_lxc(vmid, action, files, boost=None):
         print("Der Container ist ausgeschaltet – bitte zuerst starten."); return 1
     if action == "script":
         say("App aktualisieren (Update-Skript der Community-Scripts)")
+        fix_update_source(vmid)
         print("Falls Fragen kommen: meist einfach mit Enter bestätigen.\n", flush=True)
         return subprocess.call(["pct", "exec", vmid, "--", "bash", "-lc", "update"])
     if action == "compose":

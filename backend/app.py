@@ -1720,7 +1720,7 @@ UPDATE_COMMANDS = {
 
 # Welche Apps laufen in der Maschine? (Community-Scripts-„update“ und Docker-Compose-Projekte)
 APP_DETECT = r'''
-if [ -x /usr/bin/update ]; then echo "SCRIPT $(grep -o 'ct/[A-Za-z0-9_.-]*\.sh' /usr/bin/update 2>/dev/null | head -1)"; fi
+if [ -x /usr/bin/update ]; then echo "SCRIPT $(grep -o 'ct/[A-Za-z0-9_.-]*\.sh' /usr/bin/update 2>/dev/null | head -1) $(grep -q tteck/Proxmox /usr/bin/update && echo OLD)"; fi
 if command -v docker >/dev/null 2>&1; then
   if docker compose version >/dev/null 2>&1; then docker compose ls -a --format json 2>/dev/null | sed 's/^/COMPOSE /'; fi
   docker ps -a --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Image}}|{{.Label "org.opencontainers.image.version"}}|{{.State}}' 2>/dev/null | sed 's/^/IMG /'
@@ -1745,9 +1745,10 @@ def _parse_apps(out: str) -> list[dict]:
         if line.startswith("SCRIPT"):
             m = re.search(r"ct/([A-Za-z0-9_.-]+)\.sh", line)
             slug = m.group(1).lower() if m else ""
-            nice = next((n for _, n, sl in KNOWN_APPS if sl == slug), None)
+            nice = next((n for _, n, sl in KNOWN_APPS if sl.replace("-", "") == slug.replace("-", "")), None)
             apps.append({"id": "script", "kind": "script", "name": nice or (slug.replace("-", " ").title() if slug else "App"),
-                         "slug": slug or None, "detail": "Installiert mit den Community-Scripts – deren Update-Skript bringt die App auf die neueste Version.",
+                         "slug": slug or None, "detail": "Installiert mit den Community-Scripts – deren Update-Skript bringt die App auf die neueste Version."
+                         + (" Hinweis: Dieser Container nutzt noch das alte, stillgelegte Skript (tteck) – es wird beim Update automatisch auf die aktuellen Community-Scripts umgestellt." if line.rstrip().endswith(" OLD") else ""),
                          "services": [], "pinned": []})
         elif line.startswith("COMPOSE "):
             with contextlib.suppress(ValueError):
