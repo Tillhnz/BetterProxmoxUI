@@ -25,6 +25,50 @@ const APP_TIPS = {
 };
 
 // ---------------------------------------------------------------------------
+// FileHelper (Dateien im Browser, https://github.com/Tillhnz/FileHelper):
+// Jeder Ordner unter /mnt im FileHelper-Container erscheint dort als eigene Freigabe.
+// ---------------------------------------------------------------------------
+const FH_REPO = "https://github.com/Tillhnz/FileHelper";
+const FH_INSTALL = 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Tillhnz/FileHelper/main/proxmox/create-lxc.sh)"';
+
+export function isFileHelper(g, conf) {
+  if (!g || g.type !== "lxc") return false;
+  const tags = String(g.tags || conf?.tags || "").toLowerCase().split(/[;, ]+/);
+  return tags.includes("filehelper") || /file-?helper/i.test(g.name || "");
+}
+
+function fhSlug(text) {
+  return String(text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/^nas-/, "")
+    .replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 40) || "nas";
+}
+
+/** Pfad im FileHelper-Container: /mnt/<Ordnername>, ohne Doppelungen */
+function fhTarget(conf, source, path) {
+  const base = !path || path === source.path ? fhSlug(source.title) : fhSlug(path.split("/").pop());
+  const used = new Set(Object.entries(conf || {}).filter(([k]) => /^mp\d+$/.test(k)).map(([, v]) => parseConfigValue(v).mp));
+  let t = `/mnt/${base}`, n = 2;
+  while (used.has(t)) t = `/mnt/${base}-${n++}`;
+  return t;
+}
+
+async function fhInfo(g, conf) {
+  const port = Number((String(conf?.description || "").match(/Port:\s*(\d{2,5})/) || [])[1] || 8080);
+  let ip = null;
+  if (g.status === "running") {
+    try {
+      const ifs = await pve("GET", nodePath(`/lxc/${g.vmid}/interfaces`));
+      const eth = (ifs || []).find(i => i.name !== "lo" && (i.inet || i["ip-addresses"]));
+      ip = eth?.inet ? String(eth.inet).split("/")[0] : (eth?.["ip-addresses"] || []).find(a => a["ip-address-type"] === "inet")?.["ip-address"] || null;
+    } catch { /* keine Rechte oder Proxmox zu alt */ }
+  }
+  if (!ip) {
+    const net0 = String(conf?.net0 || "").match(/(?:^|,)ip=([0-9.]+)\//);
+    if (net0) ip = net0[1];
+  }
+  return { guest: g, conf, port, url: ip ? `http://${ip}:${port}` : null };
+}
+
+// ---------------------------------------------------------------------------
 // Daten zusammenführen
 // ---------------------------------------------------------------------------
 function parseConfigValue(v) {
@@ -189,7 +233,9 @@ async function loadModel() {
       action: { label: "Sicherungen auf NAS umstellen", fn: "moveBackups" } });
   }
 
-  return { sources, links, problems, guests, configs, jobs, host, admin, localBackups, dirMaps, pveVersion };
+  const fileHelpers = await Promise.all(lxcs.filter(g => isFileHelper(g, configs.get(g.vmid))).map(g => fhInfo(g, configs.get(g.vmid))));
+
+  return { sources, links, problems, guests, configs, jobs, host, admin, localBackups, dirMaps, pveVersion, fileHelpers };
 }
 
 // ---------------------------------------------------------------------------
@@ -202,12 +248,24 @@ export async function renderStorage({ page, el, go }) {
   const body = h("div", null, loader());
   el.append(body);
   let model = null;
+  let pending = null;
 
-  async function reload() {
-    try { model = await loadModel(); draw(); }
-    catch (e) { clear(body).append(callout("bad", "Laden fehlgeschlagen", e.message)); }
+  function reload() {
+    pending = (async () => {
+      try { model = await loadModel(); draw(); }
+      catch (e) { clear(body).append(callout("bad", "Laden fehlgeschlagen", e.message)); }
+    })();
+    return pending;
   }
-  connectBtn.addEventListener("click", () => connectShareSheet(reload, () => model && shareFolderSheet(model, null, reload)));
+  // Nach dem Verbinden einer NAS direkt im FileHelper anzeigen
+  const openFileHelper = async (sourceId) => {
+    await pending;
+    const fh = model?.fileHelpers?.[0];
+    if (!fh) return;
+    shareFolderSheet(model, model.sources.find(x => x.id === sourceId) || null, reload, { guest: fh.guest });
+  };
+  connectBtn.addEventListener("click", () => connectShareSheet(reload, () => model && shareFolderSheet(model, null, reload),
+    model?.fileHelpers?.length ? openFileHelper : null));
   shareBtn.addEventListener("click", () => model && shareFolderSheet(model, null, reload));
 
   function draw() {
@@ -235,6 +293,10 @@ export async function renderStorage({ page, el, go }) {
       body.append(explainCard());
       return;
     }
+
+    // FileHelper: welche Ordner dort zu sehen sind
+    const fhCard = fileHelperCard(model, reload, go);
+    if (fhCard) body.append(fhCard);
 
     // Diagramm (nur auf größeren Bildschirmen)
     if (model.links.some(l => l.guest || l.job)) body.append(h("h2", { class: "section hide-sm-block", style: { marginTop: "6px" } }, "Verbindungen"), diagram(model, page, go));
@@ -311,6 +373,7 @@ function sourceCard(s, model, reload, go) {
   if (s.kind !== "local" && s.path && model.admin) {
     card.append(h("div", { class: "row wrap", style: { marginTop: "12px" } },
       h("button", { class: "btn sm", disabled: !s.active, onclick: () => shareFolderSheet(model, s, reload) }, icon("plus", "sm"), "Ordner mit App teilen"),
+      model.fileHelpers?.length ? h("button", { class: "btn sm", disabled: !s.active, onclick: () => shareFolderSheet(model, s, reload, { guest: model.fileHelpers[0].guest }) }, icon("folder", "sm"), "Im FileHelper anzeigen") : null,
       s.kind === "pve" ? h("button", { class: "btn sm ghost", onclick: () => removeStorage(s, links, reload) }, icon("trash", "sm"), "Entfernen") : null));
   }
   return card;
@@ -394,7 +457,7 @@ function diagram(model, page, go) {
 // ---------------------------------------------------------------------------
 // Assistent: NAS-Freigabe verbinden
 // ---------------------------------------------------------------------------
-function connectShareSheet(onDone, openShare) {
+function connectShareSheet(onDone, openShare, openFileHelper) {
   openSheet((sheet, close) => {
     const d = { proto: "cifs", server: "", username: "", password: "", share: "", id: "", forBackup: false, forIso: false, writable: true, manual: false, found: null };
     const content = h("div");
@@ -486,7 +549,10 @@ function connectShareSheet(onDone, openShare) {
           } else return errorToast(e, "Verbinden fehlgeschlagen");
         }
         close();
-        toast("NAS verbunden", `„${d.id}“ ist jetzt unter /mnt/pve/${d.id} eingebunden.`, "ok", { timeout: 8000, actions: openShare ? [{ label: "Ordner mit App teilen", onClick: () => setTimeout(openShare, 600) }] : [] });
+        const actions = [];
+        if (openFileHelper) actions.push({ label: "Im FileHelper anzeigen", onClick: () => setTimeout(() => openFileHelper(`pve:${d.id}`), 400) });
+        if (openShare) actions.push({ label: "Ordner mit App teilen", onClick: () => setTimeout(openShare, 600) });
+        toast("NAS verbunden", `„${d.id}“ ist jetzt unter /mnt/pve/${d.id} eingebunden.`, "ok", { timeout: 10000, actions });
         setTimeout(onDone, 300);
       }));
     }
@@ -497,7 +563,7 @@ function connectShareSheet(onDone, openShare) {
 // ---------------------------------------------------------------------------
 // Assistent: Ordner mit einer App teilen (Bind-Mount in einen Container)
 // ---------------------------------------------------------------------------
-function shareFolderSheet(model, presetSource, onDone) {
+function shareFolderSheet(model, presetSource, onDone, { guest: presetGuest = null } = {}) {
   if (!model.admin) return toast("Nur für root@pam", "Ordner einbinden darf in Proxmox nur root.", "bad");
   const sources = model.sources.filter(s => s.kind !== "local" && s.path && s.active && !s.stale);
   if (!sources.length) return toast("Keine NAS verbunden", "Verbinde zuerst eine NAS-Freigabe.", "info");
@@ -509,7 +575,9 @@ function shareFolderSheet(model, presetSource, onDone) {
     const d = { guest: null, source: presetSource && sources.includes(presetSource) ? presetSource : sources[0], path: null, target: "", ro: false, method: "virtiofs", os: "linux" };
     d.path = d.source.path;
     const content = h("div");
-    sheet.append(h("h2", null, "Ordner mit App teilen"), content);
+    const heading = h("h2", null, presetGuest && isFileHelper(presetGuest) ? "Im FileHelper anzeigen" : "Ordner mit App teilen");
+    sheet.append(heading, content);
+    const fhSelected = () => isFileHelper(d.guest, model.configs.get(d.guest?.vmid));
 
     // Schritt 1: App wählen
     function step1() {
@@ -518,6 +586,7 @@ function shareFolderSheet(model, presetSource, onDone) {
         h("div", { class: "card pad-0 flat" }, h("div", { class: "list" }, targets.map(g => {
           const app = detectApp(g.name);
           const kind = g.type === "lxc" ? "Container" : "VM";
+          const fh = isFileHelper(g, model.configs.get(g.vmid));
           return h("div", { class: "list-item clickable", onclick: () => {
             d.guest = g;
             const tip = APP_TIPS[app?.logo];
@@ -528,7 +597,8 @@ function shareFolderSheet(model, presetSource, onDone) {
             step2();
           } },
             guestIcon(g.type, g.status, g.name),
-            h("div", { class: "grow" }, h("div", { class: "title" }, g.name), h("div", { class: "meta" }, app ? `${app.title} · ${kind} #${g.vmid}` : `${kind} #${g.vmid}`)),
+            h("div", { class: "grow" }, h("div", { class: "title" }, g.name), h("div", { class: "meta" }, fh ? `Dateien im Browser · Container #${g.vmid}` : app ? `${app.title} · ${kind} #${g.vmid}` : `${kind} #${g.vmid}`)),
+            fh ? h("span", { class: "badge accent" }, "FileHelper") : null,
             g.type === "qemu" ? h("span", { class: "badge info" }, "VM") : null,
             icon("chevronRight", "sm"));
         }))),
@@ -565,11 +635,14 @@ function shareFolderSheet(model, presetSource, onDone) {
               : h("div", { class: "muted small", style: { padding: "12px 16px" } }, "Keine Unterordner."))),
           h("div", { class: "row", style: { marginTop: "10px", gap: "8px" } }, newName, mk));
       }
-      content.append(h("p", { class: "sheet-sub" }, `Welchen Ordner soll „${d.guest.name}“ sehen? Tippe auf einen Ordner, um hineinzugehen.`),
+      content.append(h("p", { class: "sheet-sub" }, fhSelected()
+          ? "Welcher NAS-Ordner soll im FileHelper erscheinen? Die ganze Freigabe oder tippe auf einen Ordner, um hineinzugehen."
+          : `Welchen Ordner soll „${d.guest.name}“ sehen? Tippe auf einen Ordner, um hineinzugehen.`),
         h("div", { class: "stack" }, sources.length > 1 ? field("NAS-Freigabe", srcSel) : null, browser),
         h("div", { class: "sheet-foot" }, h("button", { class: "btn", onclick: step1 }, "Zurück"),
           h("button", { class: "btn primary", onclick: () => {
             if (/[\s,=]/.test(d.path)) return toast("Ordnername nicht möglich", "Proxmox kann keine Ordner mit Leerzeichen oder Kommas einbinden. Bitte einen anderen Ordner wählen.", "bad");
+            if (fhSelected()) d.target = fhTarget(model.configs.get(d.guest.vmid), d.source, d.path);
             if (d.guest.type === "qemu") step3vm(); else step3();
           } }, "Diesen Ordner nehmen")));
       browse();
@@ -579,19 +652,20 @@ function shareFolderSheet(model, presetSource, onDone) {
     function step3() {
       clear(content);
       const app = detectApp(d.guest.name);
-      const tip = APP_TIPS[app?.logo];
+      const fh = fhSelected();
+      const tip = fh ? { tip: "Der Ordner erscheint danach im FileHelper als eigene Freigabe – benannt nach dem letzten Teil des Pfads." } : APP_TIPS[app?.logo];
       const conf = model.configs.get(d.guest.vmid) || {};
       const unpriv = conf.unprivileged === 1 || conf.unprivileged === "1";
       const tIn = input({ value: d.target, autocapitalize: "off", oninput: (e) => { d.target = e.target.value.trim(); } });
       const saveBtn = h("button", { class: "btn primary" }, icon("check", "sm"), "Teilen");
-      content.append(h("p", { class: "sheet-sub" }, "Unter welchem Pfad soll die App den Ordner sehen?"),
+      content.append(h("p", { class: "sheet-sub" }, fh ? "Unter welchem Namen soll der Ordner im FileHelper erscheinen?" : "Unter welchem Pfad soll die App den Ordner sehen?"),
         h("div", { class: "stack", style: { gap: "16px" } },
           h("div", { class: "card flat", style: { padding: "12px 14px" } },
             h("div", { class: "row", style: { gap: "10px" } }, sourceIcon(d.source, 32), h("span", { class: "mono small", style: { wordBreak: "break-all" } }, d.path),
               icon("chevronRight", "sm"), guestIcon("lxc", d.guest.status, d.guest.name), h("strong", null, d.guest.name))),
-          field("Pfad in der App", tIn, "So heißt der Ordner im Container. Muss mit / beginnen."),
+          field(fh ? "Name im FileHelper" : "Pfad in der App", tIn, fh ? "Muss unter /mnt/ liegen. Beispiel: /mnt/fotos erscheint als „fotos“." : "So heißt der Ordner im Container. Muss mit / beginnen."),
           toggle("Nur lesen", "Die App kann die Dateien sehen, aber nichts ändern oder löschen.", d.ro, (v) => { d.ro = v; }),
-          tip ? callout("info", `Danach in ${app.title}`, tip.tip) : null,
+          tip ? callout("info", fh ? "Danach im FileHelper" : `Danach in ${app.title}`, tip.tip) : null,
           unpriv && d.source.type === "nfs" ? callout("warn", "Schreibrechte", "Der Container ist unprivilegiert. Damit er auf die NFS-Freigabe schreiben darf, muss die NAS alle Benutzer auf admin abbilden (Squash).") : null,
           unpriv && d.source.type === "cifs" && !d.source.unprivWritable ? callout("warn", "Schreibrechte", "Diese Freigabe wurde ohne Container-Schreibrechte eingebunden. Die App kann vermutlich nur lesen. Lösung: Freigabe entfernen und hier neu verbinden.") : null,
           d.guest.status === "running" ? callout("info", null, "Der Container wird dafür kurz neu gestartet.") : null),
@@ -599,6 +673,7 @@ function shareFolderSheet(model, presetSource, onDone) {
 
       saveBtn.addEventListener("click", () => withBusy(saveBtn, async () => {
         if (!/^\/[A-Za-z0-9._/-]+$/.test(d.target) || d.target.includes("..") || d.target === "/") return toast("Ungültiger Pfad", "Beispiel: /mnt/fotos (keine Leerzeichen).", "bad");
+        if (fh && !/^\/mnt\/[A-Za-z0-9._-]+$/.test(d.target)) return toast("Ungültiger Pfad", "Für den FileHelper bitte direkt unter /mnt/, z. B. /mnt/fotos.", "bad");
         let fresh;
         try { fresh = await pve("GET", nodePath(`/lxc/${d.guest.vmid}/config`)); } catch (e) { return errorToast(e); }
         if (Object.entries(fresh).some(([k, v]) => /^mp\d+$/.test(k) && parseConfigValue(v).mp === d.target)) return toast("Pfad schon belegt", "In diesem Container ist unter dem Pfad schon etwas eingebunden.", "bad");
@@ -611,7 +686,7 @@ function shareFolderSheet(model, presetSource, onDone) {
             const upid = await pve("POST", nodePath(`/lxc/${d.guest.vmid}/status/reboot`));
             trackTask(upid, `${d.guest.name} neu starten`, { onDone: onDone });
           } else onDone();
-          toast("Ordner geteilt", `${d.guest.name} sieht den Ordner jetzt unter ${d.target}.`, "ok", { timeout: 8000 });
+          toast(fh ? "Im FileHelper freigegeben" : "Ordner geteilt", fh ? `„${d.target.split("/").pop()}“ erscheint nach dem Neustart des Containers im FileHelper.` : `${d.guest.name} sieht den Ordner jetzt unter ${d.target}.`, "ok", { timeout: 8000 });
         } catch (e) { errorToast(e, "Teilen fehlgeschlagen"); }
       }));
     }
@@ -674,8 +749,63 @@ function shareFolderSheet(model, presetSource, onDone) {
       draw();
     }
 
-    step1();
+    if (presetGuest && targets.some(g => g.vmid === presetGuest.vmid)) {
+      d.guest = targets.find(g => g.vmid === presetGuest.vmid);
+      d.method = virtiofsOk ? "virtiofs" : "direct";
+      step2();
+    } else step1();
   });
+}
+
+// ---------------------------------------------------------------------------
+// FileHelper-Karte: welche NAS-Ordner im FileHelper zu sehen sind
+// ---------------------------------------------------------------------------
+async function runFileHelperScript(go) {
+  try {
+    const r = await api("/jobs", { method: "POST", body: { kind: "filehelper" } });
+    go(`job/${r.data.id}`);
+  } catch (e) { errorToast(e); }
+}
+
+function fileHelperCard(model, reload, go) {
+  const fhs = model.fileHelpers || [];
+  const hasNas = model.sources.some(s => s.kind !== "local" && s.active);
+  if (!fhs.length) {
+    if (!model.admin || !hasNas) return null;
+    return h("details", { class: "card", style: { marginBottom: "18px" } },
+      h("summary", { style: { cursor: "pointer", fontWeight: 650 } }, "Tipp: NAS-Dateien im Browser ansehen – mit FileHelper"),
+      h("div", { class: "stack", style: { marginTop: "12px", gap: "12px" } },
+        h("p", { class: "muted", style: { margin: 0 } }, "FileHelper zeigt deine NAS-Ordner mit Vorschau für Fotos und Videos, Hochladen, Herunterladen und Links zum Teilen – auch auf dem Handy. Installiert wird er als eigener kleiner Container. Dazu in der Host-Konsole ausführen:"),
+        state.user.host_admin
+          ? h("p", { class: "muted small", style: { margin: 0 } }, "Mit dem Knopf läuft das im eingebauten Terminal. Am Ende siehst du Adresse und Passwort.")
+          : codeBlock(FH_INSTALL),
+        h("div", { class: "row wrap" },
+          state.user.host_admin ? h("button", { class: "btn sm primary", onclick: () => runFileHelperScript(go) }, icon("download", "sm"), "FileHelper installieren") : null,
+          h("a", { class: "btn sm ghost", href: FH_REPO, target: "_blank", rel: "noopener" }, icon("external", "sm"), "Mehr zum FileHelper"))));
+  }
+  return h("div", { class: "stack", style: { marginBottom: "18px" } }, fhs.map(fh => {
+    const links = model.links.filter(l => l.guest?.vmid === fh.guest.vmid && l.kind === "bind");
+    const running = fh.guest.status === "running";
+    return h("div", { class: "card" },
+      h("div", { class: "row wrap", style: { gap: "12px", alignItems: "flex-start" } },
+        h("div", { class: "guest-icon", style: { width: "44px", height: "44px", background: "color-mix(in srgb, #2f6df6 16%, transparent)", color: "#2f6df6" } }, icon("folder")),
+        h("div", { style: { flex: 1, minWidth: "180px" } },
+          h("div", { class: "row wrap", style: { gap: "6px" } }, h("strong", { style: { fontSize: "16px" } }, "FileHelper"),
+            h("span", { class: `badge ${running ? "ok" : ""}` }, running ? "läuft" : "gestoppt"), h("span", { class: "badge" }, `Container #${fh.guest.vmid}`)),
+          h("div", { class: "muted small", style: { marginTop: "4px" } }, links.length
+            ? `${links.length} ${links.length === 1 ? "Ordner ist" : "Ordner sind"} im FileHelper zu sehen.`
+            : "Noch keine NAS-Ordner freigegeben – leg los mit „Ordner im FileHelper anzeigen“.")),
+        h("div", { class: "row wrap", style: { gap: "8px" } },
+          fh.url && running ? h("a", { class: "btn sm", href: fh.url, target: "_blank", rel: "noopener" }, icon("external", "sm"), "Öffnen") : null,
+          state.user.host_admin ? h("button", { class: "btn sm ghost", title: "Neueste Version installieren", onclick: () => runFileHelperScript(go) }, icon("refresh", "sm"), "Aktualisieren") : null,
+          model.admin ? h("button", { class: "btn sm primary", disabled: !model.sources.some(s => s.kind !== "local" && s.active), onclick: () => shareFolderSheet(model, null, reload, { guest: fh.guest }) }, icon("plus", "sm"), "Ordner im FileHelper anzeigen") : null)),
+      links.length ? h("div", { class: "card pad-0 flat", style: { marginTop: "14px" } }, h("div", { class: "list" }, links.map(l => h("div", { class: "list-item", style: { minHeight: "54px" } },
+        sourceIcon(l.source, 34),
+        h("div", { class: "grow" }, h("div", { class: "title" }, l.label.split("/").pop()),
+          h("div", { class: "meta mono" }, `${l.source.title}${l.hostPath !== l.source.path && l.source.path !== "/" ? l.hostPath.slice(l.source.path.length) : ""}`)),
+        l.ro ? h("span", { class: "badge" }, "nur lesen") : null,
+        model.admin ? h("button", { class: "btn sm icon ghost", title: "Nicht mehr im FileHelper anzeigen", onclick: () => removeLink(l, reload) }, icon("x", "sm")) : null)))) : null);
+  }));
 }
 
 function verGE(v, min) {
