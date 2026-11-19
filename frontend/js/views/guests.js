@@ -353,7 +353,7 @@ function updateSheet(type, vmid, name, go, ips = []) {
         h("li", null, "Die VM einmal herunterfahren und wieder starten.")));
       return;
     }
-    if (!info.family) {
+    if (!info.family && !(info.apps || []).length) {
       body.append(callout("warn", "System nicht erkannt", `${info.os_name ? `„${info.os_name}“` : "Dieses System"} kennt die Zentrale noch nicht. Bitte über die Konsole von Hand aktualisieren.`));
       return;
     }
@@ -376,8 +376,8 @@ function updateSheet(type, vmid, name, go, ips = []) {
         : "Der Speicher dieser Maschine kann keine Snapshots – vorher besser eine Sicherung machen.", snapshot, (v) => { snapshot = v; }));
     if (!info.snapshot_ok) body.querySelector(".toggle input").disabled = true;
 
-    // Alles auf einmal
-    if (apps.length) {
+    // Alles auf einmal (nur wenn auch das System bekannt ist)
+    if (apps.length && info.family) {
       const allBtn = h("button", { class: "btn primary" }, icon("download", "sm"), "Alles aktualisieren");
       allBtn.addEventListener("click", () => go2(allBtn, "all", apps.map(a => a.id)));
       body.append(h("div", { class: "card flat", style: { padding: "14px 16px" } },
@@ -417,6 +417,11 @@ function updateSheet(type, vmid, name, go, ips = []) {
     }
 
     // System-Pakete
+    if (!info.family) {
+      body.append(section("System-Pakete", h("p", { class: "muted small", style: { margin: 0 } },
+        `${info.os_name ? `„${info.os_name}“` : "Das System"} kennt die Zentrale noch nicht – die System-Pakete bitte über die Konsole aktualisieren. Die App lässt sich trotzdem oben aktualisieren.`)));
+      return;
+    }
     const sysBtn = h("button", { class: apps.length ? "btn sm" : "btn primary" }, icon("download", "sm"), apps.length ? "Nur System" : "System aktualisieren");
     sysBtn.addEventListener("click", () => go2(sysBtn, "system", []));
     const copyBtn = h("button", { class: "btn sm ghost", title: "Befehl kopieren", onclick: async () => {

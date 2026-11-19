@@ -1835,8 +1835,7 @@ async def guest_update_info(request: Request):
     if gtype == "lxc":
         if info["running"]:
             rc, out = await _run(["pct", "exec", vmid, "--", "sh", "-c",
-                                  '. /etc/os-release 2>/dev/null; echo "$ID"; echo "$ID_LIKE"; echo "$PRETTY_NAME"; '
-                                  'test -x /usr/bin/update && echo APP'], 30)
+                                  '. /etc/os-release 2>/dev/null; echo "$ID"; echo "$ID_LIKE"; echo "$PRETTY_NAME"; exit 0'], 30)
             lines = (out.splitlines() + ["", "", ""])[:4]
             if rc == 0:
                 info["family"] = _os_family(lines[0], lines[1])
